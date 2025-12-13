@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 
 from rr_control import DEFAULT_HOME_Q, return_home, run_rr_mode
+from ik_control import run_ik_mode
 from ur_interface import UrInterface
 
 
@@ -16,11 +17,14 @@ def main() -> None:
     while True:
         print("\nSelect control mode:")
         print("[1] Resolved-Rate (RR) control")
+        print("[2] Inverse-Kinematics (IK) control")
         print("[0] Exit")
         choice = input("Enter choice: ").strip()
 
         if choice == "1":
             run_rr_mode(ur, home_q)
+        elif choice == "2":
+            run_ik_mode(ur, home_q)
         elif choice == "0":
             try:
                 return_home(ur, home_q)
