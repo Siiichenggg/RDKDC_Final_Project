@@ -4,9 +4,9 @@ from typing import Iterable, List, Optional, Sequence
 
 import numpy as np
 
-from control import position_jacobian, urFwdKin
-from tf_frame import tf_frame
-from ur_interface import UrInterface
+from RDKDC_Final_Project.Python.control import position_jacobian, urFwdKin
+from RDKDC_Final_Project.Python.tf_frame import tf_frame
+from RDKDC_Final_Project.Python.ur_interface import UrInterface
 
 
 class JointLimitError(RuntimeError):

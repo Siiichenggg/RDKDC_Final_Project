@@ -1,6 +1,6 @@
 import numpy as np
 import time
-from control import urFwdKin
+from RDKDC_Final_Project.Python.control import urFwdKin
 
 #==============================================================================
 # Helper functions for DH parameter calculations

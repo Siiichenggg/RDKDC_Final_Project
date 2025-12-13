@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import sys
 
-from rr_control import DEFAULT_HOME_Q, return_home, run_rr_mode
-from ur_interface import UrInterface
+from RDKDC_Final_Project.Python.rr_control import DEFAULT_HOME_Q, return_home, run_rr_mode
+from RDKDC_Final_Project.Python.ur_interface import UrInterface
 
 
 def main() -> None:
