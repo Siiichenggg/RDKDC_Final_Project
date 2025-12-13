@@ -12,6 +12,7 @@ def ROTZ(theta):
     
     Args:
         theta (float): The rotation angle in radians.
+        
     Returns:
         numpy.ndarray: The 3x3 rotation matrix.
     """
@@ -70,7 +71,7 @@ def DH(a, alpha, d, theta):
 # UR5/UR5e Inverse Kinematics
 #==============================================================================
 
-def urInvKin(gd, robot_type='ur5e'):
+def urInvKin(gd, robot_type='ur5'):
     """
     Analytical Inverse kinematics for a UR5 or UR5e robot.
     """
