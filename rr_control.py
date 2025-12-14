@@ -424,6 +424,7 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
         # All downstream planning is expressed in the control frame (tool0 or pen-tip).
         push_dir = push_direction_from_pose(g_start_control)
         plan = generate_push_plan(g_start_control, push_dir)
+        print(f"Plan segments: {[name for name, _ in plan]}")
         q_curr = q_start_actual
         g_tool0_curr = g_tool0_start
         g_control_curr = g_start_control
@@ -444,6 +445,7 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
             if fast_segment:
                 ur.speed_limit = FREE_SPEED_LIMIT
             try:
+                print(f"[RR] Segment {name}: {n_steps} steps, expected duration ~{RR_DT * n_steps:.2f}s")
                 q_curr, g_tool0_curr = rr_follow_cartesian_segment(
                     ur,
                     q_curr,

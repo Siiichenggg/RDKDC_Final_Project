@@ -94,8 +94,28 @@ def exec_segment_ik(ur: UrInterface, q_curr: np.ndarray, g_curr_tip: np.ndarray,
     ur.activate_pos_control()
     q_traj = segment_to_joint_traj(g_curr_tip, g_next_tip, q_curr, rr.ROBOT_TYPE, T_tool0_tip, n_steps)
     ts = make_time_intervals(ur, q_traj)
+    total_time = float(np.sum(ts))
+    print(f"[IK] Executing segment with {q_traj.shape[1]} waypoints, est {total_time:.2f}s")
     ur.move_joints(q_traj, ts)
-    q_new = ur.get_current_joints()
+
+    def wait_until_reached(q_goal: np.ndarray, timeout: float = total_time + 2.0, tol: float = 0.01, stable_count: int = 3) -> np.ndarray:
+        """Block until the robot settles at q_goal so segments don't overwrite each other."""
+
+        start_time = time.time()
+        consecutive = 0
+        while time.time() - start_time < timeout:
+            q_meas = ur.get_current_joints().astype(float)
+            if np.max(np.abs(wrap_to_pi(q_meas - q_goal))) < tol:
+                consecutive += 1
+                if consecutive >= stable_count:
+                    return q_meas
+            else:
+                consecutive = 0
+            time.sleep(0.05)
+        raise TimeoutError(f"Segment timed out after {timeout:.1f}s without reaching goal.")
+
+    # Wait for the trajectory to finish before issuing the next segment.
+    q_new = wait_until_reached(q_traj[:, -1])
     g_tip_new = urFwdKin(q_new, rr.ROBOT_TYPE) @ T_tool0_tip
     return q_new, g_tip_new
 
@@ -125,6 +145,7 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
         # Plan all waypoints in the control frame (tip if USE_PEN_TIP else tool0).
         push_dir = rr.push_direction_from_pose(g_tip_curr)
         plan = rr.generate_push_plan(g_tip_curr, push_dir)
+        print(f"Plan segments: {[name for name, _ in plan]}")
         print(f"IK push direction: {push_dir}")
 
         for name, g_tip_target in plan:
@@ -141,6 +162,7 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
                 ur.speed_limit = rr.FREE_SPEED_LIMIT
             start_time = time.time()
             try:
+                print(f"[IK] Segment {name}: {n_steps} steps, expected duration ~{rr.RR_DT * n_steps:.2f}s")
                 q_curr, g_tip_curr = exec_segment_ik(
                     ur, q_curr, g_tip_curr, g_tip_target, T_tool0_tip, n_steps=n_steps
                 )
