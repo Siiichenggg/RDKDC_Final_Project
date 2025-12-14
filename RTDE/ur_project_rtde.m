@@ -1,345 +1,272 @@
-clear all; close all; clc;
+% UR5e Push-and-Place Final Project (RTDE)
+% Requirements:
+% - Must use Resolved-Rate (RR) control via position interface (move_joints)
+% - Must NOT modify ur_rtde_interface.m
+% - Start pose must be taught by the user (no hard-code)
 
-% Add paths for helper functions
-addpath('./Matlab/');
-addpath('./Matlab/helper_function/');
+main();
+return;
 
-%% ======================== CONFIGURATION ========================
-ROBOT_TYPE = 'ur5e';           % Robot type
-PUSH_DISTANCE = 0.16;          % Push distance in meters (16 cm)
-BOX_SIZE = 0.13;               % Box edge length in meters (13 cm)
-LIFT_HEIGHT = 0.05;            % Height to lift end-effector (5 cm)
-CONTROL_GAIN = 1.0;            % RR control gain
-TIME_STEP = 0.1;               % Control loop time step (seconds)
-POS_THRESHOLD = 0.01;          % Position convergence threshold (1 cm)
-ROT_THRESHOLD = 5 * pi/180;    % Rotation convergence threshold (5 degrees)
-MAX_ITERATIONS = 500;          % Maximum iterations for each movement
-SINGULARITY_THRESHOLD = 0.01;  % Minimum singular value threshold
+function main()
+    clc;
 
-% Push direction in base frame (choose X or Y axis)
-% For this example, we push along +Y direction
-PUSH_DIRECTION = [0; 1; 0];    % Unit vector along Y-axis
+    % Ensure this folder is on path (for ur_rtde_interface.m)
+    thisDir = fileparts(mfilename('fullpath'));
+    addpath(thisDir);
 
-fprintf('\n');
-fprintf('╔════════════════════════════════════════════════════════════╗\n');
-fprintf('║      UR5e Push-and-Place Project (RTDE Environment)       ║\n');
-fprintf('╚════════════════════════════════════════════════════════════╝\n');
-fprintf('\n');
+    % ---------------- User-configurable parameters ----------------
+    mode = "real";                % "real" (UR5e) or "sim" (URSim)
+    simIP = "0.0.0.0";            % used only when mode == "sim"
 
-%% ======================== INITIALIZATION ========================
-fprintf('[STEP 1] Initializing robot interface...\n');
+    dt = 0.10;                    % RR integration time step (s)
+    pushDist = 0.03;              % 3 cm (m)
+    liftHeight = 0.08;            % lift after pushing (m)
+    otherSideOffset = 0.06;       % move to the other side (m), adjust to your block size
 
-% Create robot interface (use 'sim' for simulation or 'physical' for real robot)
-% Uncomment the appropriate line below:
-ur = ur_rtde_interface("sim");  % For simulation
-% ur = ur_rtde_interface("physical");  % For physical robot
+    % Push direction expressed in the same base frame as ur.get_current_transformation()
+    % (default: base +Y)
+    pushDir = [0; 1; 0];
+    pushDir = pushDir / max(1e-12, norm(pushDir));
 
-fprintf('✓ Robot interface initialized successfully.\n\n');
+    % RR controller gains (units: 1/s)
+    Kp_pos = 1.5;
+    Kp_ori = 1.0;
 
-%% ===================== STEP 1: TEACHING PHASE =====================
-fprintf('╔════════════════════════════════════════════════════════════╗\n');
-fprintf('║                    TEACHING PHASE                          ║\n');
-fprintf('╚════════════════════════════════════════════════════════════╝\n');
-fprintf('\n');
-fprintf('Please manually move the robot to the starting position\n');
-fprintf('(left side of the box, end-effector touching the box).\n\n');
-fprintf('Press ENTER when ready to record the starting position...\n');
-pause;
+    % Limits & stopping conditions
+    qdotLimit = 1.2;              % rad/s (per-joint clamp)
+    posTol = 0.002;               % m
+    oriTol = 3 * pi/180;          % rad (approx)
+    maxTimePerSegment = 25;       % s
 
-% Record starting configuration
-q_start = ur.get_current_joints();
-g_start = ur.get_current_transformation();
+    % Jacobian damping (for near-singularity robustness)
+    lambdaMin = 1e-4;
+    lambdaMax = 5e-2;
+    condSoft = 250;
+    condHard = 2000;
+    % --------------------------------------------------------------
 
-fprintf('✓ Starting position recorded:\n');
-fprintf('  Joint angles (rad): [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f]\n', q_start);
-fprintf('  Position (m): [%.4f, %.4f, %.4f]\n', g_start(1:3, 4));
-fprintf('\n');
+    ur = [];
+    try
+        % Initialize
+        if mode == "sim"
+            ur = ur_rtde_interface(mode, simIP);
+        else
+            ur = ur_rtde_interface(mode);
+        end
+        ur.activate_pos_control();
 
-%% ================ STEP 2: COMPUTE TARGET POSITIONS ================
-fprintf('[STEP 2] Computing target positions...\n\n');
+        fprintf('\n=== UR5e Push-and-Place (RTDE) ===\n');
+        fprintf('RR dt = %.3f s, pushDist = %.3f m\n', dt, pushDist);
 
-% Target 1: Push forward 16 cm along push direction
-p_start = g_start(1:3, 4);
-p_target1 = p_start + PUSH_DISTANCE * PUSH_DIRECTION;
-R_start = g_start(1:3, 1:3);
+        % ---------------- Step 1: Teaching start ----------------
+        fprintf('\n[Step 1] Teaching start pose (no hard-code)\n');
+        fprintf('Please use the teach pendant to move the robot to the START pose:\n');
+        fprintf('- End-effector should be on the LEFT side of the block (ready to push)\n');
+        fprintf('- Make sure the TCP is at the pushing height and aligned safely\n');
+        input('When ready, press ENTER to record g_start and q_start... ', 's');
 
-g_target1 = [R_start, p_target1; 0 0 0 1];
+        q_start = ur.get_current_joints();
+        q_start = q_start(:);
+        g_start = ur.get_current_transformation();
+        fprintf('Recorded start.\n');
 
-fprintf('✓ Target 1 (after push forward):\n');
-fprintf('  Position (m): [%.4f, %.4f, %.4f]\n', p_target1);
-fprintf('  Push direction: [%.1f, %.1f, %.1f]\n', PUSH_DIRECTION);
-fprintf('  Push distance: %.2f cm\n\n', PUSH_DISTANCE * 100);
+        % ---------------- Step 2: Compute target ----------------
+        fprintf('\n[Step 2] Compute push target pose (+%.0f mm along pushDir)\n', pushDist*1000);
+        g_target = g_start;
+        g_target(1:3,4) = g_start(1:3,4) + pushDist * pushDir;
 
-%% ============= STEP 3: PUSH BOX FORWARD (16 cm) =============
-fprintf('╔════════════════════════════════════════════════════════════╗\n');
-fprintf('║              TASK 1: PUSH BOX FORWARD 16 cm                ║\n');
-fprintf('╚════════════════════════════════════════════════════════════╝\n');
-fprintf('\n');
+        % ---------------- Step 3: Execute pushing ----------------
+        fprintf('\n[Step 3] Push block forward %.0f mm using RR control\n', pushDist*1000);
+        rr_move_to_pose(ur, g_target, dt, Kp_pos, Kp_ori, qdotLimit, posTol, oriTol, ...
+            maxTimePerSegment, lambdaMin, lambdaMax, condSoft, condHard);
 
-% Execute RR control to push box forward
-fprintf('Starting Resolved-Rate control...\n');
-final_error1 = executeRRControl(ur, g_target1, ROBOT_TYPE, CONTROL_GAIN, ...
-                                TIME_STEP, POS_THRESHOLD, ROT_THRESHOLD, ...
-                                MAX_ITERATIONS, SINGULARITY_THRESHOLD);
+        g_push_actual = ur.get_current_transformation();
+        [dSO3_fwd, dR3_fwd] = pose_error_metrics(g_push_actual, g_target);
+        fprintf('\n[Error Report] Forward push: actual vs theoretical target\n');
+        fprintf('d_SO(3) = %.6f\n', dSO3_fwd);
+        fprintf('d_R^3   = %.6f m\n', dR3_fwd);
 
-if final_error1 < 0
-    error('❌ Task 1 failed! See error messages above.');
+        % -------- Lift, move to other side, push back (place) ----
+        fprintf('\n[Step 3b] Lift end-effector (%.0f mm)\n', liftHeight*1000);
+        g_lift = g_push_actual;
+        g_lift(3,4) = g_lift(3,4) + liftHeight;
+        rr_move_to_pose(ur, g_lift, dt, Kp_pos, Kp_ori, qdotLimit, posTol, oriTol, ...
+            maxTimePerSegment, lambdaMin, lambdaMax, condSoft, condHard);
+
+        fprintf('\n[Step 3c] Move to the other side (offset %.0f mm)\n', otherSideOffset*1000);
+        g_other_above = g_lift;
+        g_other_above(1:3,4) = g_other_above(1:3,4) + otherSideOffset * pushDir;
+        rr_move_to_pose(ur, g_other_above, dt, Kp_pos, Kp_ori, qdotLimit, posTol, oriTol, ...
+            maxTimePerSegment, lambdaMin, lambdaMax, condSoft, condHard);
+
+        fprintf('\n[Step 3d] Lower to pushing height\n');
+        g_other = g_other_above;
+        g_other(3,4) = g_other(3,4) - liftHeight;
+        rr_move_to_pose(ur, g_other, dt, Kp_pos, Kp_ori, qdotLimit, posTol, oriTol, ...
+            maxTimePerSegment, lambdaMin, lambdaMax, condSoft, condHard);
+
+        fprintf('\n[Step 3e] Push back %.0f mm (towards start)\n', pushDist*1000);
+        g_back_target = g_other;
+        g_back_target(1:3,4) = g_back_target(1:3,4) - pushDist * pushDir;
+        rr_move_to_pose(ur, g_back_target, dt, Kp_pos, Kp_ori, qdotLimit, posTol, oriTol, ...
+            maxTimePerSegment, lambdaMin, lambdaMax, condSoft, condHard);
+
+        g_back_actual = ur.get_current_transformation();
+        [dSO3_back, dR3_back] = pose_error_metrics(g_back_actual, g_back_target);
+        fprintf('\n[Error Report] Push-back: actual vs theoretical target\n');
+        fprintf('d_SO(3) = %.6f\n', dSO3_back);
+        fprintf('d_R^3   = %.6f m\n', dR3_back);
+
+        fprintf('\nDone.\n');
+    catch ME
+        fprintf(2, '\n[ur_project_rtde] ERROR: %s\n', ME.message);
+        for k = 1:numel(ME.stack)
+            fprintf(2, '  at %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
+        end
+    end
+
+    cleanup_ur(ur);
 end
 
-fprintf('✓ Task 1 completed. Final position error: %.2f cm\n\n', final_error1);
-pause(0.5);
+% =========================== RR CONTROL ===========================
+function rr_move_to_pose(ur, g_des, dt, Kp_pos, Kp_ori, qdotLimit, posTol, oriTol, ...
+    maxTime, lambdaMin, lambdaMax, condSoft, condHard)
 
-%% ============= STEP 4: LIFT END-EFFECTOR =============
-fprintf('[STEP 3] Lifting end-effector...\n');
-
-q_current = ur.get_current_joints();
-g_current = ur.get_current_transformation();
-
-% Create lifted position (move up along Z-axis)
-p_lifted = g_current(1:3, 4) + [0; 0; LIFT_HEIGHT];
-R_current = g_current(1:3, 1:3);
-g_lifted = [R_current, p_lifted; 0 0 0 1];
-
-% Execute lift motion
-final_error_lift = executeRRControl(ur, g_lifted, ROBOT_TYPE, CONTROL_GAIN, ...
-                                    TIME_STEP, POS_THRESHOLD, ROT_THRESHOLD, ...
-                                    MAX_ITERATIONS, SINGULARITY_THRESHOLD);
-
-fprintf('✓ End-effector lifted by %.1f cm\n\n', LIFT_HEIGHT * 100);
-pause(0.5);
-
-%% ============= STEP 5: MOVE TO OPPOSITE SIDE =============
-fprintf('[STEP 4] Moving to opposite side of box...\n');
-
-% Calculate approach position on opposite side
-% Move to opposite side: go back in push direction by (PUSH_DISTANCE + BOX_SIZE)
-% and maintain the lifted height
-p_opposite = p_lifted - (PUSH_DISTANCE + BOX_SIZE) * PUSH_DIRECTION;
-g_opposite = [R_current, p_opposite; 0 0 0 1];
-
-% Execute move to opposite side
-final_error_move = executeRRControl(ur, g_opposite, ROBOT_TYPE, CONTROL_GAIN, ...
-                                    TIME_STEP, POS_THRESHOLD, ROT_THRESHOLD, ...
-                                    MAX_ITERATIONS, SINGULARITY_THRESHOLD);
-
-fprintf('✓ Moved to opposite side of box\n\n');
-pause(0.5);
-
-%% ============= STEP 6: LOWER TO BOX HEIGHT =============
-fprintf('[STEP 5] Lowering to box contact height...\n');
-
-% Lower back down
-p_lowered = g_opposite(1:3, 4) - [0; 0; LIFT_HEIGHT];
-g_lowered = [R_current, p_lowered; 0 0 0 1];
-
-% Execute lowering motion
-final_error_lower = executeRRControl(ur, g_lowered, ROBOT_TYPE, CONTROL_GAIN, ...
-                                     TIME_STEP, POS_THRESHOLD, ROT_THRESHOLD, ...
-                                     MAX_ITERATIONS, SINGULARITY_THRESHOLD);
-
-fprintf('✓ End-effector lowered to box contact height\n\n');
-pause(0.5);
-
-%% ============= STEP 7: PUSH BOX BACK =============
-fprintf('╔════════════════════════════════════════════════════════════╗\n');
-fprintf('║           TASK 2: PUSH BOX BACK TO NEAR ORIGIN             ║\n');
-fprintf('╚════════════════════════════════════════════════════════════╝\n');
-fprintf('\n');
-
-% Calculate push-back target (push forward to move box back)
-% Push same distance as before to return box near original position
-p_pushback = p_lowered + PUSH_DISTANCE * PUSH_DIRECTION;
-g_pushback = [R_current, p_pushback; 0 0 0 1];
-
-% Execute push back
-fprintf('Starting push-back motion...\n');
-final_error2 = executeRRControl(ur, g_pushback, ROBOT_TYPE, CONTROL_GAIN, ...
-                                TIME_STEP, POS_THRESHOLD, ROT_THRESHOLD, ...
-                                MAX_ITERATIONS, SINGULARITY_THRESHOLD);
-
-if final_error2 < 0
-    error('❌ Task 2 failed! See error messages above.');
-end
-
-fprintf('✓ Task 2 completed. Final position error: %.2f cm\n\n', final_error2);
-
-%% =================== FINAL ERROR REPORTING ===================
-fprintf('╔════════════════════════════════════════════════════════════╗\n');
-fprintf('║                    FINAL ERROR REPORT                      ║\n');
-fprintf('╚════════════════════════════════════════════════════════════╝\n');
-fprintf('\n');
-
-% Get final actual pose
-g_final_actual = ur.get_current_transformation();
-
-% Compute errors using specified formulas
-% Desired final pose is g_pushback
-[pos_error, ori_error] = computePoseError(g_final_actual, g_pushback);
-
-fprintf('Target pose (g_target):\n');
-fprintf('  Position (m): [%.4f, %.4f, %.4f]\n', g_pushback(1:3, 4));
-fprintf('  Rotation matrix:\n');
-fprintf('    [%.4f, %.4f, %.4f]\n', g_pushback(1, 1:3));
-fprintf('    [%.4f, %.4f, %.4f]\n', g_pushback(2, 1:3));
-fprintf('    [%.4f, %.4f, %.4f]\n\n', g_pushback(3, 1:3));
-
-fprintf('Actual pose (g_actual):\n');
-fprintf('  Position (m): [%.4f, %.4f, %.4f]\n', g_final_actual(1:3, 4));
-fprintf('  Rotation matrix:\n');
-fprintf('    [%.4f, %.4f, %.4f]\n', g_final_actual(1, 1:3));
-fprintf('    [%.4f, %.4f, %.4f]\n', g_final_actual(2, 1:3));
-fprintf('    [%.4f, %.4f, %.4f]\n\n', g_final_actual(3, 1:3));
-
-fprintf('────────────────────────────────────────────────────────────\n');
-fprintf('ERROR METRICS (using specified formulas):\n');
-fprintf('────────────────────────────────────────────────────────────\n');
-fprintf('  Position Error (d_ℝ³)  : %.6f m (%.4f cm)\n', pos_error, pos_error * 100);
-fprintf('  Orientation Error (d_SO(3)): %.6f rad (%.4f deg)\n', ori_error, ori_error * 180/pi);
-fprintf('────────────────────────────────────────────────────────────\n');
-fprintf('\n');
-
-fprintf('╔════════════════════════════════════════════════════════════╗\n');
-fprintf('║              TASK COMPLETED SUCCESSFULLY! ✓                ║\n');
-fprintf('╚════════════════════════════════════════════════════════════╝\n');
-fprintf('\n');
-
-%% ======================= CLEANUP =======================
-fprintf('[CLEANUP] Closing robot connection...\n');
-delete(ur);
-fprintf('✓ Cleanup complete.\n\n');
-
-
-%% ===================== HELPER FUNCTIONS =====================
-
-function final_error = executeRRControl(ur, g_desired, robot_type, K, ...
-                                        T_step, pos_thresh, rot_thresh, ...
-                                        max_iter, sing_thresh)
-    % Executes Resolved-Rate control to move robot to desired pose
-    %
-    % Inputs:
-    %   ur: ur_rtde_interface object
-    %   g_desired: 4x4 desired end-effector pose
-    %   robot_type: 'ur5' or 'ur5e'
-    %   K: control gain
-    %   T_step: time step (seconds)
-    %   pos_thresh: position convergence threshold (m)
-    %   rot_thresh: rotation convergence threshold (rad)
-    %   max_iter: maximum iterations
-    %   sing_thresh: singularity threshold
-    %
-    % Output:
-    %   final_error: final position error in cm (-1 if failed)
-
-    iteration = 0;
-    converged = false;
-
-    while ~converged && iteration < max_iter
-        iteration = iteration + 1;
-
-        % Get current joint configuration
-        q_current = ur.get_current_joints();
-
-        % Compute current end-effector pose
-        g_current = urFwdKin(q_current, robot_type);
-
-        % Compute error transformation: g_error = g_desired^{-1} * g_current
-        g_error = FINV(g_desired) * g_current;
-
-        % Extract twist from error
-        xi_error = getXi(g_error);
-
-        % Extract position and orientation components
-        v_error = xi_error(1:3);      % Linear velocity (m)
-        omega_error = xi_error(4:6);  % Angular velocity (rad)
-
-        % Compute error magnitudes
-        pos_error = norm(v_error);
-        rot_error = norm(omega_error);
-
-        % Display progress every 10 iterations
-        if mod(iteration, 10) == 1
-            fprintf('  Iter %3d: pos_err = %.4f cm, rot_err = %.2f deg\n', ...
-                    iteration, pos_error*100, rot_error*180/pi);
+    tStart = tic;
+    while true
+        if toc(tStart) > maxTime
+            error('RR timeout (%.1f s) before reaching target.', maxTime);
         end
 
-        % Check convergence
-        if pos_error < pos_thresh && rot_error < rot_thresh
-            converged = true;
-            final_error = pos_error * 100;  % Convert to cm
-            fprintf('  ✓ Converged at iteration %d\n', iteration);
-            fprintf('    Final errors: pos = %.4f cm, rot = %.2f deg\n', ...
-                    final_error, rot_error*180/pi);
-            break;
-        end
+        q = ur.get_current_joints();
+        q = q(:);
+        g = ur.get_current_transformation();
 
-        % Compute Body Jacobian
-        J_b = urBodyJacobian(q_current, robot_type);
+        r = g(1:3,4);
+        R = g(1:3,1:3);
+        rd = g_des(1:3,4);
+        Rd = g_des(1:3,1:3);
 
-        % Check for singularity
-        sigma = svd(J_b);
-        sigma_min = min(sigma);
+        % Task-space error (base frame of get_current_transformation)
+        e_p = rd - r;
+        R_err = Rd * R.';                 % rotation from current to desired
+        e_w = 0.5 * vee3(R_err - R_err.'); % small-angle orientation error vector
 
-        if sigma_min < sing_thresh
-            fprintf('  ❌ ABORT: Singularity detected! σ_min = %.6f\n', sigma_min);
-            final_error = -1;
+        if norm(e_p) < posTol && norm(e_w) < oriTol
             return;
         end
 
-        % Check condition number
-        cond_num = cond(J_b);
-        if cond_num > 1e6
-            fprintf('  ❌ ABORT: Ill-conditioned Jacobian! cond = %.2e\n', cond_num);
-            final_error = -1;
-            return;
+        v = Kp_pos * e_p;
+        w = Kp_ori * e_w;
+        V = [v; w]; % 6x1 spatial twist in the same frame as get_current_transformation
+
+        J = get_jacobian(q);
+
+        % Damped least-squares "inverse" near singularities
+        c = cond(J);
+        if c < condSoft
+            qdot = J \ V;
+        else
+            alpha = min(1, max(0, (c - condSoft) / max(1, (condHard - condSoft))));
+            lambda = (1 - alpha) * lambdaMin + alpha * lambdaMax;
+            qdot = (J.'*J + (lambda^2)*eye(6)) \ (J.' * V);
         end
 
-        % Compute joint velocity: qdot = -K * J_b^{-1} * xi_error
-        % (negative sign because we want to reduce the error)
-        qdot = -K * (J_b \ xi_error);
+        qdot = clamp_vec(qdot, -qdotLimit, qdotLimit);
+        q_next = (q + qdot(:) * dt);
+        q_next = q_next(:);
 
-        % Integration: q_next = q_current + qdot * dt
-        q_next = q_current + qdot * T_step;
-
-        % Send position command to robot (simulating velocity control)
-        ur.move_joints(q_next, T_step);
-
-        % Wait for motion to complete
-        pause(T_step);
-    end
-
-    % Check if we timed out
-    if ~converged
-        fprintf('  ❌ ABORT: Maximum iterations (%d) reached\n', max_iter);
-        fprintf('    Final errors: pos = %.4f cm, rot = %.2f deg\n', ...
-                pos_error*100, rot_error*180/pi);
-        final_error = -1;
+        stepTic = tic;
+        ur.move_joints(q_next, dt);
+        % Keep approximate update rate (move_joints may be blocking or non-blocking)
+        elapsed = toc(stepTic);
+        if elapsed < dt
+            pause(dt - elapsed);
+        end
     end
 end
 
+% =========================== JACOBIAN =============================
+function J = get_jacobian(q)
+    % UR5e (UR5 family) standard DH parameters (meters)
+    % a(i), alpha(i), d(i) with joint variable q(i)
+    a = [0, -0.42500, -0.39225, 0, 0, 0];
+    d = [0.089159, 0, 0, 0.10915, 0.09465, 0.0823];
+    alpha = [pi/2, 0, 0, pi/2, -pi/2, 0];
 
-function [pos_error, ori_error] = computePoseError(g_actual, g_desired)
-    % Computes pose error using specified formulas from project handbook
-    %
-    % Inputs:
-    %   g_actual: 4x4 actual transformation matrix
-    %   g_desired: 4x4 desired transformation matrix
-    %
-    % Outputs:
-    %   pos_error: position error d_ℝ³ = ||r - r_d|| (meters)
-    %   ori_error: orientation error d_SO(3) = sqrt(tr((R - R_d)(R - R_d)^T))
+    T = eye(4);
+    p = zeros(3, 7);
+    z = zeros(3, 7);
+    p(:,1) = T(1:3,4);
+    z(:,1) = T(1:3,3);
 
-    % Extract position vectors
-    r_actual = g_actual(1:3, 4);
-    r_desired = g_desired(1:3, 4);
+    for i = 1:6
+        T = T * dh(a(i), alpha(i), d(i), q(i));
+        p(:,i+1) = T(1:3,4);
+        z(:,i+1) = T(1:3,3);
+    end
 
-    % Extract rotation matrices
-    R_actual = g_actual(1:3, 1:3);
-    R_desired = g_desired(1:3, 1:3);
+    p_e = p(:,7);
+    Jv = zeros(3,6);
+    Jw = zeros(3,6);
+    for i = 1:6
+        z_prev = z(:,i);
+        p_prev = p(:,i);
+        Jv(:,i) = cross(z_prev, (p_e - p_prev));
+        Jw(:,i) = z_prev;
+    end
+    J_dh = [Jv; Jw];
 
-    % Position error: d_ℝ³ = ||r - r_d||
-    pos_error = norm(r_actual - r_desired);
+    % Match the frame convention used by ur.get_current_transformation():
+    % g_measured = Offset * g_true, Offset = RotX(pi)
+    R0 = rot_x(pi);
+    Ad = [R0 zeros(3); zeros(3) R0];
+    J = Ad * J_dh;
+end
 
-    % Orientation error: d_SO(3) = sqrt(tr((R - R_d)(R - R_d)^T))
-    R_diff = R_actual - R_desired;
-    ori_error = sqrt(trace(R_diff * R_diff'));
+function A = dh(a, alpha, d, theta)
+    ct = cos(theta); st = sin(theta);
+    ca = cos(alpha); sa = sin(alpha);
+    A = [ ct, -st*ca,  st*sa, a*ct;
+          st,  ct*ca, -ct*sa, a*st;
+           0,     sa,     ca,    d;
+           0,      0,      0,    1];
+end
+
+% =========================== METRICS ==============================
+function [dSO3, dR3] = pose_error_metrics(g, gd)
+    R = g(1:3,1:3);
+    Rd = gd(1:3,1:3);
+    r = g(1:3,4);
+    rd = gd(1:3,4);
+
+    % Manual-specified formulas (DO NOT change):
+    dSO3 = sqrt(trace((R - Rd) * (R - Rd).'));
+    dR3 = norm(r - rd);
+end
+
+% =========================== HELPERS ==============================
+function v = vee3(S)
+    v = [S(3,2); S(1,3); S(2,1)];
+end
+
+function R = rot_x(theta)
+    R = [1 0 0;
+         0 cos(theta) -sin(theta);
+         0 sin(theta)  cos(theta)];
+end
+
+function x = clamp_vec(x, lo, hi)
+    x = min(max(x, lo), hi);
+end
+
+function cleanup_ur(ur)
+    if isempty(ur)
+        return;
+    end
+    try
+        delete(ur);
+    catch
+        % ignore cleanup errors
+    end
 end
