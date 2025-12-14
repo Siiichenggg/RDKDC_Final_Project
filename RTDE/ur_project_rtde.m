@@ -78,20 +78,28 @@ try
         'twist_alpha', TWIST_ALPHA ...
     );
 
-    % Push direction in base frame (right-to-left along -Y in UR base)
-    push_dir_base = [0; -1; 0];
-    push_dir_base = push_dir_base / norm(push_dir_base);
+% Push direction in base/world frame (along +X)
+push_dir_base = [1; 0; 0];
+push_dir_base = push_dir_base / norm(push_dir_base);
 
-    % 5) First push: start -> end
-    p_start = g_start(1:3,4);
-    R_start = g_start(1:3,1:3);
-    p_end = p_start + PUSH_DIST * push_dir_base;
-    g_end = [R_start, p_end; 0 0 0 1];
+% 5) First push: start -> end
+p_start = g_start(1:3,4);
+% Fix end-effector orientation: z points downward, x aligns with push_dir
+z_axis = [0; 0; -1];
+y_axis = cross(z_axis, push_dir_base);
+if norm(y_axis) < 1e-6
+    y_axis = [0; 1; 0]; % fallback if colinear (should not happen for x push)
+end
+y_axis = y_axis / norm(y_axis);
+x_axis = cross(y_axis, z_axis);
+R_task = [x_axis, y_axis, z_axis];
+p_end = p_start + PUSH_DIST * push_dir_base;
+g_end = [R_task, p_end; 0 0 0 1];
 
-    rrParams.progress_dir = push_dir_base;
-    rrParams.progress_deadband = PROGRESS_DEADBAND;
-    [succ1, q_after_first, log1] = rr_move_to_pose( ...
-        ur, q_start, g_end, rrParams, "push forward 16cm", JOINT_LIMITS, Z_MIN);
+rrParams.progress_dir = push_dir_base;
+rrParams.progress_deadband = PROGRESS_DEADBAND;
+[succ1, q_after_first, log1] = rr_move_to_pose( ...
+    ur, q_start, g_end, rrParams, "push forward 16cm", JOINT_LIMITS, Z_MIN);
     g_end_actual = ur.get_current_transformation();
     fprintf('Reached end of first push (measured):\n');
     disp(g_end_actual);
@@ -107,21 +115,21 @@ try
     approach_shift = CUBE_LEN + SIDE_CLEARANCE; % distance to clear cube to far face
 
     % Lift straight up from end
-    g_lift_from_end = g_end_actual;
-    g_lift_from_end(3,4) = z_lift;
+g_lift_from_end = g_end_actual;
+g_lift_from_end(3,4) = z_lift;
 
-    % Move over the cube to the opposite side at lift height
-    p_pre = g_end_actual(1:3,4) + approach_shift * rev_dir;
-    g_pre_lift = [R_start, p_pre; 0 0 0 1]; % same orientation, opposite side
-    g_pre_lift(3,4) = z_lift;
+% Move over the cube to the opposite side at lift height
+p_pre = g_end_actual(1:3,4) + approach_shift * rev_dir;
+g_pre_lift = [R_task, p_pre; 0 0 0 1]; % same orientation, opposite side
+g_pre_lift(3,4) = z_lift;
 
-    % Descend to contact height on far side
-    g_pre_contact = g_pre_lift;
-    g_pre_contact(3,4) = z_contact;
+% Descend to contact height on far side
+g_pre_contact = g_pre_lift;
+g_pre_contact(3,4) = z_contact;
 
-    % Final desired pose after pushing back
-    p_final = g_pre_contact(1:3,4) + PUSH_DIST * rev_dir;
-    g_final = [R_start, p_final; 0 0 0 1];
+% Final desired pose after pushing back
+p_final = g_pre_contact(1:3,4) + PUSH_DIST * rev_dir;
+g_final = [R_task, p_final; 0 0 0 1];
 
     % 7) Execute second sequence
     fprintf('--- Second segment: reposition for reverse push ---\n');
