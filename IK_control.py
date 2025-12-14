@@ -199,7 +199,7 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
         rr.log_pose_details("Start", g_control_curr, g_control_curr)
 
         # Plan waypoints in the control frame (tip if USE_PEN_TIP else tool0).
-        push_dir = rr.select_push_direction(g_control_curr)
+        push_dir = rr.resolve_push_direction(g_control_curr)
         plan = rr.generate_push_plan(g_control_curr, push_dir)
         print(f"Plan segments: {[name for name, _ in plan]}")
         print(f"IK push direction: {push_dir}")
@@ -212,6 +212,7 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
 
             fast_segment = name in {
                 "lift_after_push_1",
+                "cross_over_cube",
                 "detour_out",
                 "detour_to_opp",
                 "opp_above",

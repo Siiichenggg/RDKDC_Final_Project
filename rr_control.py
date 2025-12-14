@@ -26,7 +26,7 @@ USE_VEL_CONTROL = False  # Toggle RR mode between velocity control (True) and po
 # If the axis derived from the start pose points the opposite direction, we flip it to align with this.
 PUSH_DIRECTION_BASE = np.array([0.0, 1.0, 0.0])
 
-PUSH_DISTANCE = float(os.getenv("UR_PUSH_DISTANCE", "0.03"))  # meters (project spec: ~3 cm)
+PUSH_DISTANCE = float(os.getenv("UR_PUSH_DISTANCE", "0.16"))  # meters (PDF spec is ~0.03)
 CUBE_LEN = 0.13       # cube edge length in meters
 SIDE_CLEARANCE = 0.02 # extra room when moving to the opposite side
 LIFT_HEIGHT = 0.08    # clearance height for free-space motion
@@ -81,8 +81,17 @@ PUSH_DIR_CHOICES = {
     "-y": np.array([0.0, -1.0, 0.0]),
 }
 
-# Default to the project PDF push-and-place plan (push, detour around cube, push back).
-SIMPLE_PUSH_PLAN = False
+# If True, ask the user to choose a push direction interactively.
+PROMPT_PUSH_DIR = bool(int(os.getenv("UR_PROMPT_DIR", "0")))
+
+# Push-and-place plan style:
+# - UR_SIMPLE_PLAN=0: push-and-place (push -> lift -> opposite side -> push back -> retreat) [default]
+# - UR_SIMPLE_PLAN=1: simple push-and-return to the start (no opposite-side push)
+SIMPLE_PUSH_PLAN = bool(int(os.getenv("UR_SIMPLE_PLAN", "0")))
+
+# If True, lift above the cube and cross straight over it; if False, detour around the cube footprint.
+CROSS_OVER_CUBE = bool(int(os.getenv("UR_CROSS_OVER_CUBE", "1")))
+OVER_CUBE_CLEARANCE = 0.02  # extra height above cube edge when crossing over it
 
 
 # ---------------------------------------------------------------------------
@@ -159,19 +168,40 @@ def select_push_direction(g_start_control: np.ndarray) -> np.ndarray:
     Operators can also select +X/-X/-Y or derive from the taught pose.
     """
     print(
-        "\nPush direction options (table plane):\n"
-        "  y  -> base +Y (default, 'right' in project PDF)\n"
-        "  -y -> base -Y\n"
-        "  x  -> base +X\n"
-        "  -x -> base -X\n"
-        "  start -> derive from the taught pose lateral axis (uses start-frame Y/X)"
+        "\n推的方向（都在桌面平面内）：\n"
+        "  y    -> 基座坐标系 +Y（默认，按 PDF 图 1 的“向右”）\n"
+        "  -y   -> 基座坐标系 -Y\n"
+        "  x    -> 基座坐标系 +X\n"
+        "  -x   -> 基座坐标系 -X\n"
+        "  start-> 用你示教起始姿态的轴自动推导方向（投影到桌面）\n"
+        "提示：如果方向选反了，重新运行选相反方向即可。"
     )
-    resp = input("Enter push direction [y/-y/x/-x/start] (ENTER=y): ").strip().lower()
+    resp = input("输入方向 [y/-y/x/-x/start]（回车= y）: ").strip().lower()
     if resp == "":
         resp = "y"
     if resp in PUSH_DIR_CHOICES:
         return PUSH_DIR_CHOICES[resp]
     return push_direction_from_pose(g_start_control)
+
+
+def resolve_push_direction(g_start_control: np.ndarray) -> np.ndarray:
+    """
+    Resolve the push direction without confusing prompts.
+
+    Default: base +Y (PDF 图 1 的“向右”)
+    Override:
+      - set UR_PUSH_DIR to one of: y, -y, x, -x, start
+      - or set UR_PROMPT_DIR=1 to ask interactively
+    """
+    if PROMPT_PUSH_DIR:
+        return select_push_direction(g_start_control)
+
+    mode = os.getenv("UR_PUSH_DIR", "y").strip().lower()
+    if mode in PUSH_DIR_CHOICES:
+        return PUSH_DIR_CHOICES[mode].copy()
+    if mode == "start":
+        return push_direction_from_pose(g_start_control)
+    return PUSH_DIRECTION_BASE.copy()
 
 
 def generate_simple_push_plan(g_start_control: np.ndarray, push_dir: np.ndarray) -> list[tuple[str, np.ndarray]]:
@@ -440,8 +470,11 @@ def interp_cartesian_segment(g_start: np.ndarray, g_end: np.ndarray, n_steps: in
     poses: List[np.ndarray] = []
     p0 = g_start[:3, 3]
     p1 = g_end[:3, 3]
+    # Use the desired orientation (g_end) so each segment keeps the global target pose.
+    R_fixed = g_end[:3, :3]
     for s in np.linspace(0.0, 1.0, n_steps):
-        g = np.array(g_start, copy=True)
+        g = np.eye(4)
+        g[:3, :3] = R_fixed
         g[:3, 3] = (1 - s) * p0 + s * p1
         poses.append(g)
     return poses
@@ -493,7 +526,7 @@ def generate_push_plan(g_start_control: np.ndarray, push_dir: np.ndarray) -> lis
     Waypoints in the control frame (tool0 or tip):
     1) push forward by PUSH_DISTANCE (end of first push, "end" in the PDF)
     2) lift to free-space height
-    3) detour around the cube in the table plane (no passing through the cube footprint)
+    3) move to the opposite side of the cube (computed from the first push end)
     4) descend at the opposite side (target pose "(2)" computed from the first push end)
     5) push back by PUSH_DISTANCE
     6) retreat (lift)
@@ -505,42 +538,59 @@ def generate_push_plan(g_start_control: np.ndarray, push_dir: np.ndarray) -> lis
     push_dir = push_dir / n
     opp_dir = -push_dir
 
-    lift_vec = np.array([0.0, 0.0, LIFT_HEIGHT], dtype=float)
+    lift_height = float(LIFT_HEIGHT)
+    if CROSS_OVER_CUBE:
+        lift_height = max(lift_height, float(CUBE_LEN + OVER_CUBE_CLEARANCE))
+    lift_vec = np.array([0.0, 0.0, lift_height], dtype=float)
 
     g_push_1_end = cartesian_target(g_start_control, push_dir, PUSH_DISTANCE)
     g_lift_after_1 = translate_pose(g_push_1_end, lift_vec)
 
-    # Detour around the cube: step sideways out of the cube corridor, traverse along push axis,
-    # then step back in on the opposite side. This avoids needing to lift above the cube height.
-    z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
-    side_dir = np.cross(z_axis, push_dir)
-    side_dir[2] = 0.0
-    side_norm = np.linalg.norm(side_dir)
-    if side_norm < 1e-9:
-        raise RuntimeError("push_dir must not be parallel to the Z axis.")
-    side_dir = side_dir / side_norm
+    if CROSS_OVER_CUBE:
+        # Lift above the cube and cross straight over it.
+        g_opp_above = cartesian_target(g_lift_after_1, push_dir, CUBE_LEN)
+        detour_waypoints: list[tuple[str, np.ndarray]] = [
+            ("cross_over_cube", g_opp_above),
+        ]
+    else:
+        # Detour around the cube footprint in the table plane (still lifted).
+        z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
+        side_dir = np.cross(z_axis, push_dir)
+        side_dir[2] = 0.0
+        side_norm = np.linalg.norm(side_dir)
+        if side_norm < 1e-9:
+            raise RuntimeError("push_dir must not be parallel to the Z axis.")
+        side_dir = side_dir / side_norm
 
-    side_step = 0.5 * CUBE_LEN + SIDE_CLEARANCE
-    side_offset = side_step * side_dir
+        side_step = 0.5 * CUBE_LEN + SIDE_CLEARANCE
+        side_offset = side_step * side_dir
 
-    g_detour_out = translate_pose(g_lift_after_1, side_offset)
-    g_detour_to_opp = cartesian_target(g_detour_out, push_dir, CUBE_LEN)
-    g_opp_above = translate_pose(g_detour_to_opp, -side_offset)
+        g_detour_out = translate_pose(g_lift_after_1, side_offset)
+        g_detour_to_opp = cartesian_target(g_detour_out, push_dir, CUBE_LEN)
+        g_opp_above = translate_pose(g_detour_to_opp, -side_offset)
+        detour_waypoints = [
+            ("detour_out", g_detour_out),
+            ("detour_to_opp", g_detour_to_opp),
+            ("opp_above", g_opp_above),
+        ]
 
     g_opp_contact = translate_pose(g_opp_above, -lift_vec)
     g_push_2_end = cartesian_target(g_opp_contact, opp_dir, PUSH_DISTANCE)
     g_retreat = translate_pose(g_push_2_end, lift_vec)
 
-    return [
+    plan: list[tuple[str, np.ndarray]] = [
         ("push_1_end", g_push_1_end),
         ("lift_after_push_1", g_lift_after_1),
-        ("detour_out", g_detour_out),
-        ("detour_to_opp", g_detour_to_opp),
-        ("opp_above", g_opp_above),
-        ("opp_contact", g_opp_contact),
-        ("push_2_end", g_push_2_end),
-        ("retreat", g_retreat),
     ]
+    plan.extend(detour_waypoints)
+    plan.extend(
+        [
+            ("opp_contact", g_opp_contact),
+            ("push_2_end", g_push_2_end),
+            ("retreat", g_retreat),
+        ]
+    )
+    return plan
 
 
 def rr_follow_cartesian_segment(
@@ -598,10 +648,7 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
         publish_frame("start_pose", g_start_control)
         log_pose_details("Start", g_start_control, g_start_control)
 
-        # Default push direction: base +Y (per project PDF); override via prompt only if desired.
-        push_dir = PUSH_DIRECTION_BASE.copy()
-        if not SIMPLE_PUSH_PLAN:
-            push_dir = select_push_direction(g_start_control)
+        push_dir = resolve_push_direction(g_start_control)
         print(f"Using push direction: {push_dir}")
 
         plan = (
@@ -627,6 +674,7 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
             # Free-space segments can be a bit faster; keep push/contact segments slower.
             fast_segment = name in {
                 "lift_after_push_1",
+                "cross_over_cube",
                 "detour_out",
                 "detour_to_opp",
                 "opp_above",
