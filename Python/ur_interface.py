@@ -68,8 +68,9 @@ class UrInterface(Node):
         # Service clients
         self.pendant_control_client = self.create_client(Trigger, '/io_and_status_controller/hand_back_control')
         self.ros_control_client = self.create_client(Trigger, '/io_and_status_controller/resend_robot_program')
-        self.switch_to_pos_ctrl_client = self.create_client(Trigger, 'rdkdc/swtich_to_pos_ctrl')
-        self.switch_to_vel_ctrl_client = self.create_client(Trigger, 'rdkdc/swtich_to_vel_ctrl')
+        # Correct service names (typos prevented successful lookups and blocked motion)
+        self.switch_to_pos_ctrl_client = self.create_client(Trigger, 'rdkdc/switch_to_pos_ctrl')
+        self.switch_to_vel_ctrl_client = self.create_client(Trigger, 'rdkdc/switch_to_vel_ctrl')
         self.get_curr_ctrl_mode_client = self.create_client(Trigger, 'rdkdc/get_curr_ctrl_mode')
 
         UrInterface._executor.add_node(self)
