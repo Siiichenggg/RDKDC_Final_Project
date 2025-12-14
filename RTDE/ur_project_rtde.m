@@ -27,6 +27,8 @@ CUBE_LEN = 0.13;               % cube side length (m)
 SIDE_CLEARANCE = 0.02;         % clearance when moving around cube (m)
 PLOT_ERRORS = true;            % plot error curves at the end
 BATCH_STEPS = 1;               % 1 = send every step; increase cautiously if motion is too stop/go
+TWIST_ALPHA = 0.4;             % low-pass on twist command (0=no smoothing, 1=hold)
+PROGRESS_DEADBAND = 0.005;     % m; ignore small backward motion along push dir to reduce chatter
 %% ---------------------------------------------------------
 
 % Add current folder to path for helpers, and parent for ur_rtde_interface
