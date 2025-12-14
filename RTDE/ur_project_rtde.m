@@ -29,6 +29,11 @@ PLOT_ERRORS = true;            % plot error curves at the end
 BATCH_STEPS = 1;               % 1 = send every step; increase cautiously if motion is too stop/go
 TWIST_ALPHA = 0.4;             % low-pass on twist command (0=no smoothing, 1=hold)
 PROGRESS_DEADBAND = 0.005;     % m; ignore small backward motion along push dir to reduce chatter
+W_POS = 1.0;                   % RR weighting for translation rows
+W_ROT = 6.0;                   % RR weighting for rotation rows (bigger => better orientation holding)
+DLS_LAMBDA = 0.05;             % damped least squares lambda (stability near singularities)
+V_MAX = 0.04;                  % m/s cap on commanded linear velocity
+W_MAX = 0.5;                   % rad/s cap on commanded angular velocity
 %% ---------------------------------------------------------
 
 % Add current folder to path for helpers, and parent for ur_rtde_interface
@@ -59,6 +64,12 @@ try
     q_start = ur.get_current_joints();
     fprintf('Start pose recorded.\n');
     disp(g_start);
+    % Sanity check: compare measured pose to model FK at the same joints.
+    g_fk = ur5e_fkine(q_start);
+    R_err = g_start(1:3,1:3) * g_fk(1:3,1:3)';
+    ang = acos(min(1, max(-1, (trace(R_err) - 1) / 2)));
+    p_diff = norm(g_start(1:3,4) - g_fk(1:3,4));
+    fprintf('Model-vs-measured check: pos diff=%.4f m, rot diff=%.3f rad\n', p_diff, ang);
 
     % 4) Wait for user to trigger RR
     input('Press ENTER to start RR motion from taught start...','s');
@@ -74,7 +85,12 @@ try
         'speed_limit', ur.speed_limit, ...
         'fk_fun', @ur5e_fkine, ...
         'jac_fun', @ur5e_geometric_jacobian, ...
-        'batch_size', BATCH_STEPS ...
+        'batch_size', BATCH_STEPS, ...
+        'w_pos', W_POS, ...
+        'w_rot', W_ROT, ...
+        'dls_lambda', DLS_LAMBDA, ...
+        'v_max', V_MAX, ...
+        'w_max', W_MAX ...
     );
 
     % Push direction in base/world frame (along +X)

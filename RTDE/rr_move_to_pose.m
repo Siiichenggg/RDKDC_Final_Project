@@ -40,6 +40,29 @@ if isfield(params, 'batch_size') && params.batch_size > 0
     bSize = round(params.batch_size);
     bSize = max(1, bSize);
 end
+
+% Weighted damped least-squares (helps keep world orientation fixed)
+w_pos = 1.0;
+if isfield(params, 'w_pos') && ~isempty(params.w_pos)
+    w_pos = params.w_pos;
+end
+w_rot = 1.0;
+if isfield(params, 'w_rot') && ~isempty(params.w_rot)
+    w_rot = params.w_rot;
+end
+dls_lambda = 0.0;
+if isfield(params, 'dls_lambda') && ~isempty(params.dls_lambda)
+    dls_lambda = params.dls_lambda;
+end
+v_max = inf;
+if isfield(params, 'v_max') && ~isempty(params.v_max)
+    v_max = params.v_max;
+end
+w_max = inf;
+if isfield(params, 'w_max') && ~isempty(params.w_max)
+    w_max = params.w_max;
+end
+
 q_batch = [];
 dt_batch = [];
 
@@ -62,12 +85,35 @@ for k = 1:params.maxSteps
     end
 
     % RR twist command in spatial frame
-    V = [params.kp_pos * e_p; params.kp_rot * e_R];
+    v_cmd = params.kp_pos * e_p;
+    w_cmd = params.kp_rot * e_R;
+    if isfinite(v_max)
+        v_norm = norm(v_cmd);
+        if v_norm > v_max
+            v_cmd = (v_max / v_norm) * v_cmd;
+        end
+    end
+    if isfinite(w_max)
+        w_norm = norm(w_cmd);
+        if w_norm > w_max
+            w_cmd = (w_max / w_norm) * w_cmd;
+        end
+    end
+    V = [v_cmd; w_cmd];
 
     % Spatial Jacobian at current configuration (expressed in base frame)
     J = params.jac_fun(q_curr);
 
-    dq = pinv(J) * V * params.dt;
+    % Solve dq with weighted damped least squares:
+    %   dq = argmin ||W(J*dq - V)||^2 + lambda^2||dq||^2
+    W = diag([w_pos; w_pos; w_pos; w_rot; w_rot; w_rot]);
+    Jw = W * J;
+    Vw = W * V;
+    if dls_lambda > 0
+        dq = (Jw' * ((Jw * Jw' + (dls_lambda^2) * eye(6)) \ Vw)) * params.dt;
+    else
+        dq = pinv(Jw) * Vw * params.dt;
+    end
     [dq_scaled, dt_cmd] = clamp_velocity(dq, params.dt, params.speed_limit);
     dq = dq_scaled;
 
