@@ -1,18 +1,3 @@
-%% UR5e Push-and-Place Project (RTDE Environment)
-% This script implements a "Push-and-Place" task using Resolved-Rate control
-% via the position interface (since velocity control is disabled in RTDE).
-%
-% Task Flow:
-%   1. Teaching: User manually moves robot to starting position
-%   2. Compute target position 16 cm along push direction
-%   3. Push box 16 cm forward
-%   4. Lift end-effector, move to opposite side
-%   5. Push box back to near-original position
-%   6. Report position and orientation errors
-%
-% Author: Claude Code
-% Date: 2025-12-14
-
 clear all; close all; clc;
 
 % Add paths for helper functions
