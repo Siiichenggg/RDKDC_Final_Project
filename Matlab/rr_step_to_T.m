@@ -1,30 +1,36 @@
-function [done, q_next] = rr_step_to_T(ur, T_des, dt, posTol, ~)
-%RR_STEP_TO_T One RR step toward desired transform (base->tool0).
-% Output q_next is 6x1.
+function [done, q_next] = rr_step_to_T(ur, T_des, dt, posTol, opts)
+%RR_STEP_TO_T One resolved-rate (RR) step toward desired transform (base->tool0).
+% Arrow-chain per step k: q_k -> fwdKin -> e_k -> v_k -> J(q_k) -> qdot_k (DLS) -> q_{k+1}.
+% opts is optional; fields: Kp_pos, speed_margin, useDLS, dls_lambda, pinv_rcond.
 
+    cfg = local_defaults(opts);
+
+    % --- q_k: read joints ---
     q = ur.get_current_joints();            % 6x1 (force column)
     q = q(:);
     T = ur.get_current_transformation();    % 4x4
 
-    % --- position error (position-only control) ---
+    % --- r_k: forward kinematics (position only) ---
     p  = T(1:3,4);
     pd = T_des(1:3,4);
 
-    % position error
+    % --- e_k: position error & convergence ---
     ep = pd - p;
-
-    % Check convergence (position only, like Python version)
     done = (norm(ep) < posTol);
+    if done
+        q_next = q;
+        return;
+    end
 
-    % --- RR law (position-only control, like Python version) ---
-    Kp_pos = 0.3;   % softer gain, align with slower Python tuning
-    v = Kp_pos * ep;   % 3x1 velocity command
+    % --- v_k: desired tool linear velocity ---
+    v = cfg.Kp_pos * ep;   % 3x1 velocity command
 
-    % --- Position Jacobian (3x6) ---
+    % --- J(q_k): position Jacobian (3x6) ---
     J_full = get_tool0_jacobian(ur, q);    % 6x6
     J_pos = J_full(4:6, :);   % Extract linear velocity part (rows 4-6)
 
-    qdot = pinv(J_pos, 1e-3) * v;
+    % --- qdot_k: DLS or pseudo-inverse solve ---
+    qdot = solve_rr_velocity(J_pos, v, cfg);
 
     % Debug: check if qdot makes sense
     % (Uncomment for debugging)
@@ -32,8 +38,7 @@ function [done, q_next] = rr_step_to_T(ur, T_des, dt, posTol, ~)
     % fprintf('  qdot max = %.4f\n', max(abs(qdot)));
 
     % --- safety: joint speed limit (use ur.speed_limit with margin) ---
-    speed_margin = 0.3;  % mirror Python RR_SPEED_MARGIN
-    eff_speed_limit = ur.speed_limit * speed_margin;
+    eff_speed_limit = ur.speed_limit * cfg.speed_margin;
     qdot = max(min(qdot, eff_speed_limit), -eff_speed_limit);
 
     q_next = q + qdot * dt;
@@ -49,6 +54,39 @@ function [done, q_next] = rr_step_to_T(ur, T_des, dt, posTol, ~)
     if scale > 1
         dq = dq / scale;
         q_next = q + dq;
+    end
+end
+
+
+function cfg = local_defaults(opts)
+    if nargin < 1 || ~isstruct(opts) || isempty(opts)
+        opts = struct();
+    end
+    cfg.Kp_pos = fallback(opts, 'Kp_pos', 0.3);
+    cfg.speed_margin = fallback(opts, 'speed_margin', 0.3);
+    cfg.useDLS = fallback(opts, 'useDLS', true);
+    cfg.dls_lambda = fallback(opts, 'dls_lambda', 1e-2);
+    cfg.pinv_rcond = fallback(opts, 'pinv_rcond', 1e-3);
+end
+
+
+function val = fallback(opts, field, defaultVal)
+    if isfield(opts, field) && ~isempty(opts.(field))
+        val = opts.(field);
+    else
+        val = defaultVal;
+    end
+end
+
+
+function qdot = solve_rr_velocity(J_pos, v, cfg)
+    if cfg.useDLS
+        % Damped least squares: qdot = J' * inv(J J' + lambda^2 I) * v
+        JJt = J_pos * J_pos.';
+        lambda2I = (cfg.dls_lambda ^ 2) * eye(size(JJt));
+        qdot = J_pos.' * ((JJt + lambda2I) \ v);
+    else
+        qdot = pinv(J_pos, cfg.pinv_rcond) * v;
     end
 end
 
