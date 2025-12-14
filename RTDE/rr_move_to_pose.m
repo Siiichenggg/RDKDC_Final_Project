@@ -40,23 +40,6 @@ if isfield(params, 'batch_size') && params.batch_size > 0
     bSize = round(params.batch_size);
     bSize = max(1, bSize);
 end
-progress_dir = [];
-if isfield(params, 'progress_dir') && ~isempty(params.progress_dir)
-    d = params.progress_dir(:);
-    if norm(d) > 0
-        progress_dir = d / norm(d);
-    end
-end
-progress_deadband = 0;
-if isfield(params, 'progress_deadband')
-    progress_deadband = params.progress_deadband;
-end
-twist_alpha = 0;
-if isfield(params, 'twist_alpha')
-    twist_alpha = max(0, min(1, params.twist_alpha)); % 0=no smoothing, 1=full hold
-end
-V_prev = zeros(6,1);
-
 q_batch = [];
 dt_batch = [];
 
@@ -78,20 +61,8 @@ for k = 1:params.maxSteps
         break;
     end
 
-    % Clamp backward component along primary push direction to reduce chatter
-    if ~isempty(progress_dir)
-        proj = dot(e_p, progress_dir);
-        if proj < 0 && abs(proj) < progress_deadband
-            e_p = e_p - progress_dir * proj; % remove small backward component
-        end
-    end
-
     % RR twist command in spatial frame
     V = [params.kp_pos * e_p; params.kp_rot * e_R];
-    if twist_alpha > 0
-        V = twist_alpha * V_prev + (1 - twist_alpha) * V;
-    end
-    V_prev = V;
 
     % Spatial Jacobian at current configuration (expressed in base frame)
     J = params.jac_fun(q_curr);
