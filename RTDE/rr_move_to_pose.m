@@ -35,7 +35,15 @@ logData.zHeight = zeros(params.maxSteps, 1);
 
 fprintf('--- RR segment: %s ---\n', label);
 
+bSize = 1;
+if isfield(params, 'batch_size') && params.batch_size > 0
+    bSize = params.batch_size;
+end
+q_batch = [];
+dt_batch = [];
+
 for k = 1:params.maxSteps
+    q_curr = ur.get_current_joints(); % keep Jacobian consistent with actual state
     g_curr = ur.get_current_transformation();
     [e_p, e_R] = compute_pose_error(g_des, g_curr);
     pos_err_norm = norm(e_p);
@@ -70,11 +78,16 @@ for k = 1:params.maxSteps
     % Safety checks before sending the waypoint
     safety_checks(q_next, jointLimits, zMin, params.fk_fun);
 
-    % Issue position command (single waypoint)
-    ur.move_joints(q_next, dt_cmd);
-
-    % Update current joints (read back for robustness)
-    q_curr = ur.get_current_joints();
+    % Buffer waypoints to reduce start/stop jerk on hardware
+    q_batch = [q_batch, q_next]; %#ok<AGROW>
+    dt_batch = [dt_batch, dt_cmd]; %#ok<AGROW>
+    if size(q_batch, 2) >= bSize || k == params.maxSteps
+        ur.move_joints(q_batch, dt_batch);
+        q_batch = [];
+        dt_batch = [];
+        % Sync current joints after sending a batch
+        q_curr = ur.get_current_joints();
+    end
 
     if mod(k, 20) == 0
         fprintf('step %d/%d | ||pos_err||=%.4f | ||rot_err||=%.4f | dq_max=%.4f | z=%.3f\n', ...

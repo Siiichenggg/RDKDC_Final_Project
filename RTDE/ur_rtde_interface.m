@@ -147,9 +147,6 @@ classdef ur_rtde_interface < handle
                 joint_v(:,i) = (joint_goal(:,i) - joint_goal(:,i-1)) ./ time_interval(i);
             end
 
-            if max(abs(joint_v), [], 'all') > self.speed_limit
-                error('Velocity over speed limit, please increase time_interval');
-            end
             
             % Send trajectory
             positions = [q_current, joint_goal];
