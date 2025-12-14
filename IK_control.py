@@ -1,34 +1,14 @@
+import time
 import numpy as np
 
 import rr_control as rr
 from IK_utils import urInvKin
 from control import urFwdKin
-from rr_control import check_joint_limits, check_table_clearance, interp_cartesian_segment
 from ur_interface import UrInterface
-
-
-# Default tool0 -> pen-tip transform (update if you measure a different offset on hardware).
-DEFAULT_T_TOOL0_TIP = np.eye(4)
-DEFAULT_T_TOOL0_TIP[2, 3] = 0.15  # meters along +Z of tool0
-TIP_FRAME_NAME = "pen_tip"
 
 
 def wrap_to_pi(x: np.ndarray) -> np.ndarray:
     return (x + np.pi) % (2 * np.pi) - np.pi
-
-
-def resolve_tool0_to_tip_transform(ur: UrInterface, q_ref: np.ndarray) -> np.ndarray:
-    """Try to read tool0->tip from TF; fall back to a conservative default."""
-
-    g_base_tool0 = urFwdKin(q_ref, rr.ROBOT_TYPE)
-    try:
-        g_base_tip = ur.get_current_transformation("base_link", TIP_FRAME_NAME)
-        if g_base_tip is not None and not np.allclose(g_base_tip, np.eye(4)):
-            return np.linalg.inv(g_base_tool0) @ g_base_tip
-        print(f"TF frame '{TIP_FRAME_NAME}' unavailable; using default tip transform.")
-    except Exception as exc:
-        print(f"TF lookup for '{TIP_FRAME_NAME}' failed ({exc}); using default tip transform.")
-    return DEFAULT_T_TOOL0_TIP.copy()
 
 
 def select_best_solution(theta_6xN: np.ndarray, q_prev: np.ndarray, robot_type: str, T_tool0_tip: np.ndarray, W=None) -> np.ndarray:
@@ -49,19 +29,23 @@ def select_best_solution(theta_6xN: np.ndarray, q_prev: np.ndarray, robot_type: 
         q = np.asarray(theta_6xN[:, j], dtype=float).reshape(6)
 
         try:
-            check_joint_limits(q)
+            rr.check_joint_limits(q)
         except Exception:
             continue
 
         try:
             g_tool0 = urFwdKin(q, robot_type)
             g_tip = g_tool0 @ tip_tf
-            check_table_clearance(g_tip)
+            rr.check_table_clearance(g_tip)
         except Exception:
             continue
 
         dq = wrap_to_pi(q - q_prev)
         cost = float(dq.T @ W @ dq)
+        # Penalize large configuration flips that might swing the elbow around.
+        max_jump = float(np.max(np.abs(dq)))
+        if max_jump > np.pi / 2:
+            cost += 5.0 * max_jump
 
         if cost < best_cost:
             best_cost = cost
@@ -75,7 +59,7 @@ def select_best_solution(theta_6xN: np.ndarray, q_prev: np.ndarray, robot_type: 
 def segment_to_joint_traj(g_start_tip: np.ndarray, g_end_tip: np.ndarray, q_seed: np.ndarray, robot_type: str, T_tool0_tip: np.ndarray, n_steps: int) -> np.ndarray:
     """Interpolate a Cartesian line in tip space and solve IK for each waypoint."""
 
-    poses_tip = interp_cartesian_segment(g_start_tip, g_end_tip, n_steps)
+    poses_tip = rr.interp_cartesian_segment(g_start_tip, g_end_tip, n_steps)
     q_prev = np.array(q_seed, dtype=float).reshape(6)
     qs = []
     T_tip_to_tool0 = np.linalg.inv(T_tool0_tip)
@@ -132,42 +116,45 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
         rr.move_to_configuration(ur, q_start)
 
         q_curr = ur.get_current_joints()
-        T_tool0_tip = resolve_tool0_to_tip_transform(ur, q_curr)
-        g_tip_des_start = urFwdKin(q_start, rr.ROBOT_TYPE) @ T_tool0_tip
-        g_tip_curr = urFwdKin(q_curr, rr.ROBOT_TYPE) @ T_tool0_tip
+        T_tool0_tip = rr.resolve_tool0_to_tip_transform(ur, q_curr, rr.USE_PEN_TIP)
+        g_tool0_curr = urFwdKin(q_curr, rr.ROBOT_TYPE)
+        g_tip_curr = rr.tip_from_tool0(g_tool0_curr, T_tool0_tip)
         rr.publish_frame("start_pose", g_tip_curr)
-        rr.log_pose_details("Start", g_tip_des_start, g_tip_curr)
+        rr.log_pose_details("Start", g_tip_curr, g_tip_curr)
 
-        # 2) compute key poses (same as RR but in tip space)
-        lift_vec = np.array([0.0, 0.0, rr.LIFT_HEIGHT])
+        # Plan all waypoints in the control frame (tip if USE_PEN_TIP else tool0).
         push_dir = rr.push_direction_from_pose(g_tip_curr)
+        plan = rr.generate_push_plan(g_tip_curr, push_dir)
+        print(f"IK push direction: {push_dir}")
 
-        g_end1 = rr.cartesian_target(g_tip_curr, push_dir, rr.PUSH_DISTANCE)
-        # 3) execute first push along plane
-        rr.publish_frame("push1_end_des", g_end1)
-        q_curr, g_tip_curr = exec_segment_ik(ur, q_curr, g_tip_curr, g_end1, T_tool0_tip, n_steps=12)
-        g_end1_actual = g_tip_curr  # use actual end pose for downstream planning
-
-        # free-space (can be faster by temporarily increasing speed_limit like RR does)
-        g_end1_up = rr.translate_pose(g_end1_actual, lift_vec)
-        g_front_above = rr.cartesian_target(g_end1_up, push_dir, rr.CUBE_LEN)
-        g_contact2 = rr.translate_pose(g_front_above, -lift_vec)
-        free_waypoints = [("end1_up", g_end1_up), ("front_above", g_front_above), ("contact2_pose", g_contact2)]
-        for name, g_next in free_waypoints:
-            rr.publish_frame(name, g_next)
+        for name, g_tip_target in plan:
+            start_pose = np.array(g_tip_curr, copy=True)
+            start_pos = g_tip_curr[:3, 3].copy()
+            rr.check_table_clearance(g_tip_target)
+            rr.publish_frame(f"{name}_des", g_tip_target)
+            print(f"{name} start pose (control frame):\n{start_pose}")
+            print(f"{name} target pose (control frame):\n{g_tip_target}")
+            n_steps = rr.adaptive_interp_steps(g_tip_curr, g_tip_target)
+            fast_segment = name in {"lift_after_push1", "side_lift", "retreat"}
             prev_limit = ur.speed_limit
-            ur.speed_limit = rr.FREE_SPEED_LIMIT
+            if fast_segment:
+                ur.speed_limit = rr.FREE_SPEED_LIMIT
+            start_time = time.time()
             try:
-                q_curr, g_tip_curr = exec_segment_ik(ur, q_curr, g_tip_curr, g_next, T_tool0_tip, n_steps=15)
+                q_curr, g_tip_curr = exec_segment_ik(
+                    ur, q_curr, g_tip_curr, g_tip_target, T_tool0_tip, n_steps=n_steps
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"IK failed at segment '{name}' targeting position {g_tip_target[:3,3]}"
+                ) from exc
             finally:
                 ur.speed_limit = prev_limit
+            duration = time.time() - start_time
+            print(f"[IK] {name}: {n_steps} waypoints, {duration:.2f} s, pos {start_pos} -> {g_tip_target[:3,3]}")
+            if name == "push2_end":
+                rr.log_pose_details("Push2 end", g_tip_target, g_tip_curr)
 
-        # push2 (slow)
-        g_end2 = rr.cartesian_target(g_tip_curr, -push_dir, rr.PUSH_DISTANCE)
-        rr.publish_frame("push2_end", g_end2)
-        q_curr, g_tip_curr = exec_segment_ik(ur, q_curr, g_tip_curr, g_end2, T_tool0_tip, n_steps=12)
-
-        rr.log_pose_details("Target", g_end2, g_tip_curr)
         print("IK push-and-place completed.")
 
     except Exception as e:
