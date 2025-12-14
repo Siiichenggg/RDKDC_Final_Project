@@ -105,14 +105,19 @@ classdef ur_rtde_interface < handle
 
         function g = get_current_transformation(self)
             pose = self.safe_read_cartesian();
-            z = pose(1);
-            y = pose(2);
-            x = pose(3);
-            R = self.rpy2M(z, y, x);
+
+            % The RTDE pose is [x y z rx ry rz] (meters, radians). Use the
+            % translation directly and convert the orientation into a
+            % rotation matrix (yaw-pitch-roll order) before adding the tool
+            % frame offset.
+            pos = pose(1:3);
+            rpy = pose(4:6);
+
+            R = self.rpy2M(rpy(3), rpy(2), rpy(1));
             offset = eye(4);
             offset(1:3, 1:3) = self.rpy2M(pi, 0, 0);
 
-            g = offset*[R pose(4:6)'; zeros(1,3) 1];
+            g = offset*[R pos'; zeros(1,3) 1];
             % orientation and position values 
             % (represented as [theta(z) theta(y) theta(x) x y z]) 
             % in radians and meters respectively
