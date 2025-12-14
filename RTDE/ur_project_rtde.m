@@ -73,6 +73,17 @@ try
 
     % 4) Wait for user to trigger RR
     input('Press ENTER to start RR motion from taught start...','s');
+    % Repeatability: explicitly return to the taught joint pose before RR.
+    % If the robot was moved after teaching (even slightly), then the first
+    % push will appear longer than PUSH_DIST because g_end was computed from
+    % the taught start pose rather than the current pose.
+    disp('Returning to taught start joints before RR...');
+    q_curr = ur.get_current_joints();
+    t_to_start = max(2.0, max(abs(q_start - q_curr)) / ur.speed_limit + 0.5);
+    ur.move_joints(q_start, t_to_start);
+    g_start_live = ur.get_current_transformation();
+    fprintf('Start pose just before RR (measured):\n');
+    disp(g_start_live);
 
     % Common RR parameters
     rrParams = struct( ...
@@ -97,11 +108,13 @@ try
     push_dir_base = [1; 0; 0];
     push_dir_base = push_dir_base / norm(push_dir_base);
 
-    % 5) First push: start -> end (keep taught orientation)
-    p_start = g_start(1:3,4);
-    R_task = g_start(1:3,1:3); % preserve taught end-effector orientation
+    % 5) First push: start -> end (keep taught world orientation)
+    % Use the current (live) position to ensure the net push equals PUSH_DIST.
+    p_start = g_start_live(1:3,4);
+    R_task = g_start(1:3,1:3); % preserve taught end-effector orientation (world frame)
     p_end = p_start + PUSH_DIST * push_dir_base;
     g_end = [R_task, p_end; 0 0 0 1];
+    fprintf('Planned first push net displacement: %.3f m\n', norm(p_end - p_start));
 
     rrParams.progress_dir = push_dir_base;
     rrParams.progress_deadband = PROGRESS_DEADBAND;
@@ -111,6 +124,7 @@ try
     g_end_actual(1:3,1:3) = R_task; % enforce orientation consistency
     fprintf('Reached end of first push (measured):\n');
     disp(g_end_actual);
+    fprintf('Measured first push net displacement: %.3f m\n', norm(g_end_actual(1:3,4) - g_start_live(1:3,4)));
     if ~succ1
         error('First push did not converge. Aborting.');
     end
