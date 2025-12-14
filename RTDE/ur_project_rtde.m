@@ -14,19 +14,21 @@ clear; clc;
 MODE = "real";                 % "real" or "sim"
 HOME_Q = [0; -pi/2; pi/2; -pi/2; -pi/2; 0]; % safe home posture
 PUSH_DIST = 0.16;              % push distance in meters (16 cm)
-DT = 0.05;                     % RR step time (s)
+DT = 0.08;                     % RR step time (s) -- larger for smoother hardware motion
 MAX_STEPS = 800;               % max iterations per RR segment
 POS_TOL = 4e-3;                % 4 mm
 ROT_TOL = 2e-2;                % rad
-Kp_pos = 2.5;
-Kp_rot = 2.0;
+Kp_pos = 1.2;                  % lower gains to reduce jerk
+Kp_rot = 1.0;
 Z_MIN = 0.05;                  % table collision threshold (m)
 JOINT_LIMITS = repmat([-2*pi, 2*pi], 6, 1); % joint limits
 LIFT_HEIGHT = 0.08;            % lift above contact height (m)
 CUBE_LEN = 0.13;               % cube side length (m)
 SIDE_CLEARANCE = 0.02;         % clearance when moving around cube (m)
 PLOT_ERRORS = true;            % plot error curves at the end
-BATCH_STEPS = 5;               % send this many RR waypoints per RTDE command to smooth motion
+BATCH_STEPS = 1;               % 1 = send every step; increase cautiously if motion is too stop/go
+TWIST_ALPHA = 0.4;             % low-pass on twist command (0=no smoothing, 1=hold)
+PROGRESS_DEADBAND = 0.005;     % m; remove tiny backward motion along push dir to avoid chatter
 %% ---------------------------------------------------------
 
 % Add current folder to path for helpers, and parent for ur_rtde_interface
@@ -72,7 +74,8 @@ try
         'speed_limit', ur.speed_limit, ...
         'fk_fun', @ur5e_fkine, ...
         'jac_fun', @ur5e_geometric_jacobian, ...
-        'batch_size', BATCH_STEPS ...
+        'batch_size', BATCH_STEPS, ...
+        'twist_alpha', TWIST_ALPHA ...
     );
 
     % Push direction in base frame (right-to-left along -Y in UR base)
@@ -85,6 +88,8 @@ try
     p_end = p_start + PUSH_DIST * push_dir_base;
     g_end = [R_start, p_end; 0 0 0 1];
 
+    rrParams.progress_dir = push_dir_base;
+    rrParams.progress_deadband = PROGRESS_DEADBAND;
     [succ1, q_after_first, log1] = rr_move_to_pose( ...
         ur, q_start, g_end, rrParams, "push forward 16cm", JOINT_LIMITS, Z_MIN);
     g_end_actual = ur.get_current_transformation();
@@ -120,6 +125,7 @@ try
 
     % 7) Execute second sequence
     fprintf('--- Second segment: reposition for reverse push ---\n');
+    rrParams.progress_dir = []; % no direction lock for non-push moves
     [succ2a, q_lift, log2a] = rr_move_to_pose( ...
         ur, q_after_first, g_lift_from_end, rrParams, "lift after push 1", JOINT_LIMITS, Z_MIN);
     fprintf('Planning far-side approach at position: [%0.4f %0.4f %0.4f] m\n', g_pre_lift(1,4), g_pre_lift(2,4), g_pre_lift(3,4));
@@ -127,6 +133,8 @@ try
         ur, q_lift, g_pre_lift, rrParams, "move above far side", JOINT_LIMITS, Z_MIN);
     [succ2c, q_contact, log2c] = rr_move_to_pose( ...
         ur, q_over, g_pre_contact, rrParams, "descend to contact", JOINT_LIMITS, Z_MIN);
+    rrParams.progress_dir = rev_dir;
+    rrParams.progress_deadband = PROGRESS_DEADBAND;
     [succ2d, q_final, log2d] = rr_move_to_pose( ...
         ur, q_contact, g_final, rrParams, "push back 16cm", JOINT_LIMITS, Z_MIN);
 
