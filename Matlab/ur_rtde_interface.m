@@ -12,10 +12,7 @@ classdef ur_rtde_interface < handle
     properties (SetAccess = private)
         robotIP
         isConnected = false
-    end
-    
-    properties (SetAccess = private)
-        robotModel      % RigidBodyTree model
+        robotModel      % RigidBodyTree model (public read for planners)
     end
     
     properties (Access = private)
@@ -29,17 +26,26 @@ classdef ur_rtde_interface < handle
         % Watchdog Timer
         lastVelCmdTime  % Stores the time of the last velocity command
         watchdogTimeout = 1.0; % Deadman switch
+        lastJoints = [];          % last good joint read (glitch filter)
+        jointJumpThreshold = 0.5; % rad threshold to reject sudden jumps
+        enableJumpFilter = false; % turn off filtering by default (URSim can jump)
     end
 
     methods
         function self = ur_rtde_interface(mode, varargin)
+            % Default to simulation when called with no args (for lab scripts)
+            if nargin < 1 || isempty(mode)
+                mode = "sim";
+            end
+            mode = string(mode);
+
             if ~exist('urRTDEClient', 'class')
                 error('urRTDEClient class not found. Please install the toolbox.');
             end
 
             if mode == "sim"
                 fprintf("Connecting to simulation\n")
-                if nargin>1
+                if nargin>1 && ~isempty(varargin{1})
                     self.robotIP = varargin{1};
                 else
                     self.robotIP = '0.0.0.0';
@@ -48,7 +54,11 @@ classdef ur_rtde_interface < handle
                 end
             else
                 fprintf("Connecting to physical UR5e\n")
-                self.robotIP = '172.22.22.2';
+                if nargin>1 && ~isempty(varargin{1})
+                    self.robotIP = varargin{1};
+                else
+                    self.robotIP = '172.22.22.2';
+                end
             end
             
             try
@@ -89,11 +99,11 @@ classdef ur_rtde_interface < handle
 
             
             self.isConnected = false;
+            self.lastJoints = [];
         end
 
         function joint_angles = get_current_joints(self)
-            joint_angles = self.safe_read_joints();
-            joint_angles = joint_angles(:);  % force 6x1 column
+            joint_angles = self.safe_read_joints().';
         end
         
         function R = rpy2M(self, z, y, x)
@@ -104,18 +114,10 @@ classdef ur_rtde_interface < handle
         end
 
         function g = get_current_transformation(self)
-            pose = self.safe_read_cartesian();
-            z = pose(1);
-            y = pose(2);
-            x = pose(3);
-            R = self.rpy2M(z, y, x);
-            offset = eye(4);
-            offset(1:3, 1:3) = self.rpy2M(pi, 0, 0);
-
-            g = offset*[R pose(4:6)'; zeros(1,3) 1];
-            % orientation and position values 
-            % (represented as [theta(z) theta(y) theta(x) x y z]) 
-            % in radians and meters respectively
+            q = self.safe_read_joints();
+            ee = self.robotModel.BodyNames{end};
+            g = getTransform(self.robotModel, q(:).', ee);
+            g(1:3, 1:3) = g(1:3, 1:3) * self.rpy2M(pi, 0, 0);
         end
         
         function mode = get_current_control_mode(self)
@@ -151,12 +153,12 @@ classdef ur_rtde_interface < handle
                 joint_v(:,i) = (joint_goal(:,i) - joint_goal(:,i-1)) ./ time_interval(i);
             end
 
-            % Auto-stretch timing if above speed limit (keeps motion smooth)
+            % Auto-stretch timing if above speed limit to avoid hard fault
             max_v = max(abs(joint_v), [], 'all');
             if max_v > self.speed_limit
                 scale = max_v / self.speed_limit * 1.05; % small margin
                 time_interval = time_interval * scale;
-                % recompute joint_v only for check/log (not strictly needed)
+                % recompute joint_v after scaling (for logging / safety)
                 joint_v(:,1) = (joint_goal(:,1) - q_current) ./ time_interval(1);
                 for i = 2:num_waypoints
                     joint_v(:,i) = (joint_goal(:,i) - joint_goal(:,i-1)) ./ time_interval(i);
@@ -247,6 +249,48 @@ classdef ur_rtde_interface < handle
 
     % --- Private Helper Methods ---
     methods (Access = private)
+        function joint_angles = safe_read_joints(self)
+            self.ensure_connection("joint read");
+            lastErr = [];
+            for attempt = 1:3
+                try
+                    joint_angles = readJointConfiguration(self.ur);
+                    if self.enableJumpFilter && ~isempty(self.lastJoints)
+                        maxJump = max(abs(joint_angles(:) - self.lastJoints(:)));
+                        if maxJump > self.jointJumpThreshold
+                            warning("Discarding joint read jump (%.3f rad). Attempt %d/3...", maxJump, attempt);
+                            lastErr = MException("ur_rtde_interface:JumpFiltered", ...
+                                                 "Joint read jump (%.3f rad) exceeded threshold %.3f rad.", ...
+                                                 maxJump, self.jointJumpThreshold);
+                            pause(0.02);
+                            if attempt < 3
+                                continue;
+                            else
+                                warning("Accepting jumpy joint read on final attempt.");
+                            end
+                        end
+                    end
+                    self.lastJoints = joint_angles(:);
+                    return;
+                catch ME
+                    lastErr = ME;
+                    warning("RTDE joint read failed (%s). Attempting reconnect (%d/3)...", ME.message, attempt);
+                    self.isConnected = false;
+                    self.reconnect("joint read retry");
+                end
+            end
+            if ~isempty(lastErr)
+                if isa(lastErr, 'MException')
+                    throw(lastErr); % lastErr may not come from a catch block
+                else
+                    rethrow(lastErr);
+                end
+            else
+                error("ur_rtde_interface:JointReadFailed", ...
+                      "Joint read failed after filtering jumpy measurements.");
+            end
+        end
+
         function ensure_connection(self, context)
             if nargin < 2
                 context = "";
@@ -254,40 +298,6 @@ classdef ur_rtde_interface < handle
             if ~self.isConnected || isempty(self.ur)
                 self.reconnect(context);
             end
-        end
-
-        function joint_angles = safe_read_joints(self)
-            self.ensure_connection("joint read");
-            lastErr = [];
-            for attempt = 1:2
-                try
-                    joint_angles = readJointConfiguration(self.ur);
-                    return;
-                catch ME
-                    lastErr = ME;
-                    warning("RTDE joint read failed (%s). Attempting reconnect (%d/2)...", ME.message, attempt);
-                    self.isConnected = false;
-                    self.reconnect("joint read retry");
-                end
-            end
-            rethrow(lastErr);
-        end
-
-        function pose = safe_read_cartesian(self)
-            self.ensure_connection("cartesian read");
-            lastErr = [];
-            for attempt = 1:2
-                try
-                    pose = readCartesianPose(self.ur);
-                    return;
-                catch ME
-                    lastErr = ME;
-                    warning("RTDE Cartesian read failed (%s). Attempting reconnect (%d/2)...", ME.message, attempt);
-                    self.isConnected = false;
-                    self.reconnect("cartesian read retry");
-                end
-            end
-            rethrow(lastErr);
         end
 
         function reconnect(self, context)
@@ -306,13 +316,14 @@ classdef ur_rtde_interface < handle
                     try
                         delete(self.ur);
                     catch
-                        % ignore failures; best effort clean-up
+                        % best-effort cleanup
                     end
                 end
 
                 pause(0.1); % give UR server a moment before reconnect
                 self.ur = urRTDEClient(self.robotIP);
                 self.robotModel = self.ur.RigidBodyTree;
+                self.lastJoints = [];
                 self.isConnected = true;
                 % sanity ping so subsequent reads do not immediately fail
                 readJointConfiguration(self.ur);
@@ -323,5 +334,36 @@ classdef ur_rtde_interface < handle
             end
         end
     end
+    % methods (Access = private)
+    %     % --- Setup Background Timer ---
+    %     function setupTimer(self)
+    %         self.updateTimer = timer(...
+    %             'ExecutionMode', 'fixedRate', ... 
+    %             'Period', 0.1, ... % 10 Hz
+    %             'BusyMode', 'drop', ... 
+    %             'TimerFcn', @self.onTimerTick, ...
+    %             'ErrorFcn', @self.onTimerError);
+    %     end
+    % 
+    %     % --- Timer Callback (Deadman) ---
+    %     function onTimerTick(self, ~, ~)
+    %         if ~isvalid(self) || ~self.isConnected
+    %             return;
+    %         end
+    % 
+    %         if self.control_mode == "Velocity"
+    %             if toc(self.lastVelCmdTime) > self.watchdogTimeout
+    %                 sendSpeedJCommands(self.ur, zeros(1,6));
+    %                 self.targetVelocity = []; 
+    %                 %disp("Triggered Safety");
+    %             end
+    %         end
+    %     end
+    % 
+    %     function onTimerError(self, ~, event)
+    %         fprintf('Timer error: %s\n', event.Data.message);
+    %         % delete(self); 
+    %     end
+    % end
 
 end

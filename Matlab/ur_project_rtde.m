@@ -9,18 +9,19 @@ ip   = "0.0.0.0";         % sim default; real IP for hardware
 
 ur = ur_rtde_interface(mode, ip);
 
-% --- Control parameters ---
-dt = 0.15;                % RR step time (s) - larger steps = faster convergence
-posTol = 5e-3;            % position tolerance: 5mm (relaxed)
-angTol = 2e-2;            % angular tolerance
-maxSteps = 300;           % reduced - should reach target faster with larger steps
+% --- Control parameters (aligned with Python RR defaults) ---
+dt = 0.05;                % RR step time (s)
+posTol = 4e-3;            % position tolerance: 4mm
+angTol = 2e-2;            % angular tolerance (unused for now)
+maxSteps = 800;           % allow enough iterations to converge
+rr_opts = struct('Kp_pos', 0.3, 'speed_margin', 0.3);
 
 % --- Task parameters ---
-push_dist = 0.3;         % 3cm push distance (project requirement)
+push_dist = 0.03;         % 3cm push distance (project requirement)
 
 % Push direction in BASE frame (like Python version)
 % Change this to control push direction:
-push_direction = [0; 1; 0];   % [X; Y; Z] in base frame
+push_direction = [0; -1; 0];   % [X; Y; Z] in base frame
                                % [1;0;0] = +X (forward)
                                % [0;1;0] = +Y (left)
                                % [0;0;1] = +Z (up)
@@ -74,7 +75,7 @@ T_endpush(1:3, 4) = p_endpush;
 fprintf('Target: [%.4f, %.4f, %.4f] m\n', p_endpush);
 
 % Execute first push
-rr_move_to_T(ur, T_endpush, dt, posTol, angTol, maxSteps);
+rr_move_to_T(ur, T_endpush, dt, posTol, angTol, maxSteps, rr_opts);
 fprintf('✓ First push done.\n');
 
 pause(0.5);
@@ -100,7 +101,7 @@ T_target(1:3, 4) = p_target;
 fprintf('Target: [%.4f, %.4f, %.4f] m\n', p_target);
 
 % Execute second push
-rr_move_to_T(ur, T_target, dt, posTol, angTol, maxSteps);
+rr_move_to_T(ur, T_target, dt, posTol, angTol, maxSteps, rr_opts);
 fprintf('✓ Second push done.\n');
 
 % ========== Done ==========
@@ -112,7 +113,7 @@ clear ur;
 
 
 % ===== Helper function =====
-function rr_move_to_T(ur, T_des, dt, posTol, angTol, maxSteps)
+function rr_move_to_T(ur, T_des, dt, posTol, angTol, maxSteps, rr_opts) %#ok<INUSD>
     % Initial position for debugging
     T_init = ur.get_current_transformation();
     p_init = T_init(1:3, 4);
@@ -120,9 +121,10 @@ function rr_move_to_T(ur, T_des, dt, posTol, angTol, maxSteps)
     total_dist = norm(p_des - p_init);
     fprintf('  Initial distance to target: %.4f m\n', total_dist);
 
+    done = false;
     for k = 1:maxSteps
         try
-            [done, q_next] = rr_step_to_T(ur, T_des, dt, posTol, angTol);
+            [done, q_next] = rr_step_to_T(ur, T_des, dt, posTol, rr_opts);
 
             % Send joint command
             % Note: move_joints is blocking and waits for completion
