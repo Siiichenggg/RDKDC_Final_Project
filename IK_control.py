@@ -143,17 +143,15 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
         push_dir = rr.push_direction_from_pose(g_tip_curr)
 
         g_end1 = rr.cartesian_target(g_tip_curr, push_dir, rr.PUSH_DISTANCE)
-        g_end1_up = rr.translate_pose(g_end1, lift_vec)
-        g_front_above = rr.cartesian_target(g_end1_up, push_dir, rr.CUBE_LEN)
-        g_contact2 = rr.translate_pose(g_front_above, -lift_vec)
-        g_end2 = rr.cartesian_target(g_contact2, -push_dir, rr.PUSH_DISTANCE)
-
-        # 3) execute segments (IK)
-        # push1 (slow)
-        rr.publish_frame("push1_end", g_end1)
+        # 3) execute first push along plane
+        rr.publish_frame("push1_end_des", g_end1)
         q_curr, g_tip_curr = exec_segment_ik(ur, q_curr, g_tip_curr, g_end1, T_tool0_tip, n_steps=12)
+        g_end1_actual = g_tip_curr  # use actual end pose for downstream planning
 
         # free-space (can be faster by temporarily increasing speed_limit like RR does)
+        g_end1_up = rr.translate_pose(g_end1_actual, lift_vec)
+        g_front_above = rr.cartesian_target(g_end1_up, push_dir, rr.CUBE_LEN)
+        g_contact2 = rr.translate_pose(g_front_above, -lift_vec)
         free_waypoints = [("end1_up", g_end1_up), ("front_above", g_front_above), ("contact2_pose", g_contact2)]
         for name, g_next in free_waypoints:
             rr.publish_frame(name, g_next)
@@ -165,6 +163,7 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
                 ur.speed_limit = prev_limit
 
         # push2 (slow)
+        g_end2 = rr.cartesian_target(g_tip_curr, -push_dir, rr.PUSH_DISTANCE)
         rr.publish_frame("push2_end", g_end2)
         q_curr, g_tip_curr = exec_segment_ik(ur, q_curr, g_tip_curr, g_end2, T_tool0_tip, n_steps=12)
 
@@ -178,3 +177,15 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
             go_home()
         except Exception as e:
             print(f"Failed to return home: {e}")
+
+
+def main() -> None:
+    """Standalone entry point for quickly running IK mode without the menu."""
+
+    ur = UrInterface()
+    home_q = rr.DEFAULT_HOME_Q.copy()
+    run_ik_mode(ur, home_q)
+
+
+if __name__ == "__main__":
+    main()
