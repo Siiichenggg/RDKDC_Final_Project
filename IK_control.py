@@ -7,6 +7,32 @@ from control import urFwdKin
 from ur_interface import UrInterface
 
 
+def unwrap_near_reference(q: np.ndarray, q_ref: np.ndarray) -> np.ndarray:
+    """Shift each joint by +/- 2π to stay numerically close to q_ref."""
+    q = np.asarray(q, dtype=float).reshape(6).copy()
+    q_ref = np.asarray(q_ref, dtype=float).reshape(6)
+    two_pi = 2.0 * np.pi
+
+    out = q.copy()
+    for i in range(6):
+        low, high = rr.JOINT_LIMITS[i]
+        k0 = int(np.round((q_ref[i] - q[i]) / two_pi))
+        best = None
+        best_abs = None
+        for k in (k0 - 1, k0, k0 + 1):
+            cand = q[i] + two_pi * k
+            if cand < low - 1e-9 or cand > high + 1e-9:
+                continue
+            abs_diff = float(abs(cand - q_ref[i]))
+            if best is None or abs_diff < best_abs:
+                best = float(cand)
+                best_abs = abs_diff
+        if best is None:
+            best = float(q[i])
+        out[i] = best
+    return out
+
+
 def select_best_solution(
     theta_6xN: np.ndarray,
     q_prev: np.ndarray,
@@ -27,7 +53,8 @@ def select_best_solution(
     tip_tf = np.asarray(T_tool0_tip, dtype=float)
 
     for j in range(theta_6xN.shape[1]):
-        q = np.asarray(theta_6xN[:, j], dtype=float).reshape(6)
+        q_raw = np.asarray(theta_6xN[:, j], dtype=float).reshape(6)
+        q = unwrap_near_reference(q_raw, q_prev)
 
         # Joint limits
         try:
@@ -43,7 +70,7 @@ def select_best_solution(
         except Exception:
             continue
 
-        dq = rr.wrap_to_pi(q - q_prev)
+        dq = q - q_prev
         cost = float(dq.T @ W @ dq)
 
         # Penalize large jumps to reduce elbow-flips
@@ -91,7 +118,7 @@ def make_time_intervals(ur: UrInterface, q_traj: np.ndarray, min_dt: float = 0.2
     q_prev = ur.get_current_joints().astype(float)
     ts = []
     for i in range(q_traj.shape[1]):
-        dq = np.max(np.abs(rr.wrap_to_pi(q_traj[:, i] - q_prev)))
+        dq = float(np.max(np.abs(q_traj[:, i] - q_prev)))
         dt = max(min_dt, float(dq) / max(ur.speed_limit, 1e-6))
         ts.append(dt)
         q_prev = q_traj[:, i]
@@ -121,12 +148,12 @@ def exec_segment_ik(
     def wait_until_reached(
         q_goal: np.ndarray,
         timeout: float = None,
-        tol: float = 0.01,
+        tol: float = 0.02,
         stable_count: int = 3,
     ) -> np.ndarray:
         """Block until the robot settles at q_goal so segments don't overwrite each other."""
         if timeout is None:
-            timeout = total_time + 2.0
+            timeout = max(total_time + 2.0, 2.0 * total_time + 5.0)
 
         start_time = time.time()
         consecutive = 0
@@ -172,7 +199,7 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
         rr.log_pose_details("Start", g_control_curr, g_control_curr)
 
         # Plan waypoints in the control frame (tip if USE_PEN_TIP else tool0).
-        push_dir = rr.push_direction_from_pose(g_control_curr)
+        push_dir = rr.select_push_direction(g_control_curr)
         plan = rr.generate_push_plan(g_control_curr, push_dir)
         print(f"Plan segments: {[name for name, _ in plan]}")
         print(f"IK push direction: {push_dir}")
@@ -183,7 +210,13 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
 
             n_steps = rr.adaptive_interp_steps(g_control_curr, g_control_target)
 
-            fast_segment = name in {"lift_after_left", "swing_to_right", "retreat"}
+            fast_segment = name in {
+                "lift_after_push_1",
+                "detour_out",
+                "detour_to_opp",
+                "opp_above",
+                "retreat",
+            }
             prev_limit = ur.speed_limit
             if fast_segment:
                 ur.speed_limit = rr.FREE_SPEED_LIMIT
@@ -200,7 +233,7 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
                 )
             except Exception as exc:
                 raise RuntimeError(
-                    f"IK failed at segment '{name}' targeting position {g_control_target[:3,3]}"
+                    f"IK failed at segment '{name}' targeting position {g_control_target[:3,3]}: {exc}"
                 ) from exc
             finally:
                 ur.speed_limit = prev_limit
@@ -208,7 +241,7 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
             duration = time.time() - start_time
             print(f"[IK] {name}: {n_steps} steps, {duration:.2f}s")
 
-            if name == "push_right_end":
+            if name == "push_2_end":
                 rr.log_pose_details("Return push end", g_control_target, g_control_curr)
 
         print("IK push-and-place completed.")

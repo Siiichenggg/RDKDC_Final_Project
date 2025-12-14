@@ -158,7 +158,8 @@ class UrInterface(Node):
         qx = trans.transform.rotation.x
         qy = trans.transform.rotation.y
         qz = trans.transform.rotation.z
-        T = quaternion_matrix([qw, qx, qy, qz])
+        # tf_transformations expects quaternions in the order [x, y, z, w]
+        T = quaternion_matrix([qx, qy, qz, qw])
         T[:3, 3] = [
             trans.transform.translation.x,
             trans.transform.translation.y,
@@ -302,9 +303,13 @@ class UrInterface(Node):
         if self.get_current_control_mode() == 'Position':
             return True
         
-        # Stop robot before switching controllers
-        self.move_joints_vel(np.zeros(6))
-        time.sleep(0.5)
+        # Stop robot before switching controllers (only possible in velocity mode)
+        if self.control_mode == "Velocity":
+            try:
+                self.move_joints_vel(np.zeros(6))
+                time.sleep(0.5)
+            except Exception:
+                pass
 
         # Send request to switch controllers
         if not self.switch_to_pos_ctrl_client.wait_for_service(timeout_sec=1.0):

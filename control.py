@@ -31,11 +31,16 @@ def _rotx(alpha: float) -> np.ndarray:
 def _dh(a: float, alpha: float, d: float, theta: float) -> np.ndarray:
     """Construct a Denavit-Hartenberg transform."""
 
-    T = np.eye(4)
-    T[:3, :3] = _rotz(theta) @ _rotx(alpha)
-    T[0, 3] = a
-    T[2, 3] = d
-    return T
+    c, s = np.cos(theta), np.sin(theta)
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    return np.array(
+        [
+            [c, -s * ca, s * sa, a * c],
+            [s, c * ca, -c * sa, a * s],
+            [0.0, sa, ca, d],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
 
 
 def _get_ur_params(robot_type: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import os
 import time
 from typing import List, Optional
 
@@ -24,7 +26,7 @@ USE_VEL_CONTROL = False  # Toggle RR mode between velocity control (True) and po
 # If the axis derived from the start pose points the opposite direction, we flip it to align with this.
 PUSH_DIRECTION_BASE = np.array([0.0, 1.0, 0.0])
 
-PUSH_DISTANCE = 0.03  # 3 cm contact push distance
+PUSH_DISTANCE = float(os.getenv("UR_PUSH_DISTANCE", "0.03"))  # meters (project spec: ~3 cm)
 CUBE_LEN = 0.13       # cube edge length in meters
 SIDE_CLEARANCE = 0.02 # extra room when moving to the opposite side
 LIFT_HEIGHT = 0.08    # clearance height for free-space motion
@@ -33,6 +35,7 @@ RR_DT = 0.08
 RR_KP = 0.6
 RR_ORIENT_KP = 0.4
 RR_POS_TOL = 5e-3
+ORIENT_TOL = 5e-3
 MAX_RR_ITERS = 600
 
 RR_SPEED_MARGIN = 0.5      # scale commands to remain comfortably within the joint-speed limit
@@ -54,7 +57,7 @@ JOINT_LIMITS = np.deg2rad(
     )
 )
 
-SIMULATION_MODE = True  # Set to False on the real robot to enable Freedrive.
+SIMULATION_MODE = bool(int(os.getenv("UR_SIM", "0")))  # default hardware; set UR_SIM=1 for RViz sim
 SIM_START_Q = np.array([0.0, -1.3, 1.4, -1.4, -1.6, 0.0])
 
 ENABLE_TF_FRAMES = True
@@ -63,12 +66,23 @@ DEFAULT_HOME_Q = np.array([0.0, -np.pi / 2, 0.0, -np.pi / 2, 0.0, 0.0])
 USE_PEN_TIP = False  # Set True if using a pen-tip offset instead of tool0
 TIP_FRAME_NAME = "pen_tip"
 
+ENABLE_ORIENT_CTRL = True  # Set False to ignore orientation in RR and stop any spinning
+
 # Default tool0 -> pen-tip transform; translation only so orientation stays with tool0.
 TOOL0_TO_PEN_TIP = np.eye(4)
 TOOL0_TO_PEN_TIP[:3, 3] = np.array([-0.049, 0.0, 0.12228])  # Adjust after measuring the real pen mount
 
 
 tf_handles: dict[str, tf_frame] = {}
+PUSH_DIR_CHOICES = {
+    "x": np.array([1.0, 0.0, 0.0]),
+    "-x": np.array([-1.0, 0.0, 0.0]),
+    "y": np.array([0.0, 1.0, 0.0]),
+    "-y": np.array([0.0, -1.0, 0.0]),
+}
+
+# Default to the project PDF push-and-place plan (push, detour around cube, push back).
+SIMPLE_PUSH_PLAN = False
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +127,81 @@ def publish_frame(name: str, g: np.ndarray) -> None:
         tf_handles[name] = tf_frame("base_link", name, g)
     else:
         tf_handles[name].move_frame("base_link", g)
+
+
+def prompt_yes_no(message: str, default: bool = True) -> bool:
+    """Simple blocking yes/no prompt."""
+    suffix = "[Y/n]" if default else "[y/N]"
+    while True:
+        resp = input(f"{message} {suffix}: ").strip().lower()
+        if resp == "" and default is not None:
+            return default
+        if resp in {"y", "yes"}:
+            return True
+        if resp in {"n", "no"}:
+            return False
+        print("Please answer y or n.")
+
+
+def select_orientation_mode() -> bool:
+    """Allow operator to disable orientation servoing if spinning was observed."""
+    print(
+        "\nOrientation control:\n"
+        "  - Keep the taught tool orientation fixed along the path (recommended).\n"
+        "  - Or disable orientation tracking to avoid any wrist spinning (position-only RR)."
+    )
+    return prompt_yes_no("Keep orientation fixed?", default=True)
+
+
+def select_push_direction(g_start_control: np.ndarray) -> np.ndarray:
+    """
+    Choose the push direction, defaulting to base +Y (right in Fig. 1 of the PDF).
+    Operators can also select +X/-X/-Y or derive from the taught pose.
+    """
+    print(
+        "\nPush direction options (table plane):\n"
+        "  y  -> base +Y (default, 'right' in project PDF)\n"
+        "  -y -> base -Y\n"
+        "  x  -> base +X\n"
+        "  -x -> base -X\n"
+        "  start -> derive from the taught pose lateral axis (uses start-frame Y/X)"
+    )
+    resp = input("Enter push direction [y/-y/x/-x/start] (ENTER=y): ").strip().lower()
+    if resp == "":
+        resp = "y"
+    if resp in PUSH_DIR_CHOICES:
+        return PUSH_DIR_CHOICES[resp]
+    return push_direction_from_pose(g_start_control)
+
+
+def generate_simple_push_plan(g_start_control: np.ndarray, push_dir: np.ndarray) -> list[tuple[str, np.ndarray]]:
+    """
+    Simple straight push and return:
+      1) push forward PUSH_DISTANCE
+      2) lift up to clear the box
+      3) move back over start (still lifted)
+      4) drop back to start
+    Orientation is kept constant by the RR loop.
+    """
+    push_dir = np.asarray(push_dir, dtype=float)
+    n = np.linalg.norm(push_dir)
+    if n < 1e-9:
+        raise RuntimeError("push_dir must be non-zero for planning.")
+    push_dir = push_dir / n
+
+    lift_vec = np.array([0.0, 0.0, LIFT_HEIGHT], dtype=float)
+
+    g_push_end = cartesian_target(g_start_control, push_dir, PUSH_DISTANCE)
+    g_lift_after_push = translate_pose(g_push_end, lift_vec)
+    g_back_over_start = translate_pose(g_start_control, lift_vec)
+    g_drop_start = g_start_control
+
+    return [
+        ("push_forward", g_push_end),
+        ("lift_after_push", g_lift_after_push),
+        ("back_over_start", g_back_over_start),
+        ("drop_start", g_drop_start),
+    ]
 
 
 def teach_pose(ur: UrInterface, label: str) -> np.ndarray:
@@ -310,13 +399,16 @@ def rr_move_to_pose(
         R_des = g_des_tool0[:3, :3]
         p_des = g_des_tool0[:3, 3]
         pos_err = p_des - p
-        rot_err = rotation_log(R_des @ R.T)
+        rot_err = rotation_log(R_des @ R.T) if ENABLE_ORIENT_CTRL else np.zeros(3)
 
-        if np.linalg.norm(pos_err) < RR_POS_TOL and np.linalg.norm(rot_err) < 5e-3:
+        if np.linalg.norm(pos_err) < RR_POS_TOL and (
+            not ENABLE_ORIENT_CTRL or np.linalg.norm(rot_err) < ORIENT_TOL
+        ):
             print("Resolved-rate target reached.")
             break
 
-        twist = np.hstack((RR_ORIENT_KP * rot_err, RR_KP * pos_err))
+        orient_twist = RR_ORIENT_KP * rot_err if ENABLE_ORIENT_CTRL else np.zeros(3)
+        twist = np.hstack((orient_twist, RR_KP * pos_err))
         J = geometric_jacobian(q, robot_type)
         J_pinv = damped_pseudoinverse(J, damping=1e-3)
         qdot = J_pinv @ twist
@@ -399,10 +491,12 @@ def return_home(ur: UrInterface, home_q: np.ndarray) -> None:
 def generate_push_plan(g_start_control: np.ndarray, push_dir: np.ndarray) -> list[tuple[str, np.ndarray]]:
     """
     Waypoints in the control frame (tool0 or tip):
-    push 3cm -> lift -> move around cube to opposite side -> drop -> push back 3cm -> retreat lift.
-
-    FIXED:
-    - Lateral clearance is now (CUBE_LEN + 2*SIDE_CLEARANCE), not inflated by push distances.
+    1) push forward by PUSH_DISTANCE (end of first push, "end" in the PDF)
+    2) lift to free-space height
+    3) detour around the cube in the table plane (no passing through the cube footprint)
+    4) descend at the opposite side (target pose "(2)" computed from the first push end)
+    5) push back by PUSH_DISTANCE
+    6) retreat (lift)
     """
     push_dir = np.asarray(push_dir, dtype=float)
     n = np.linalg.norm(push_dir)
@@ -416,20 +510,35 @@ def generate_push_plan(g_start_control: np.ndarray, push_dir: np.ndarray) -> lis
     g_push_1_end = cartesian_target(g_start_control, push_dir, PUSH_DISTANCE)
     g_lift_after_1 = translate_pose(g_push_1_end, lift_vec)
 
-    # Move to the opposite side above the cube.
-    lateral_clearance = CUBE_LEN + 2.0 * SIDE_CLEARANCE
-    g_swing_to_opp = cartesian_target(g_lift_after_1, opp_dir, lateral_clearance)
+    # Detour around the cube: step sideways out of the cube corridor, traverse along push axis,
+    # then step back in on the opposite side. This avoids needing to lift above the cube height.
+    z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
+    side_dir = np.cross(z_axis, push_dir)
+    side_dir[2] = 0.0
+    side_norm = np.linalg.norm(side_dir)
+    if side_norm < 1e-9:
+        raise RuntimeError("push_dir must not be parallel to the Z axis.")
+    side_dir = side_dir / side_norm
 
-    g_opp_contact = translate_pose(g_swing_to_opp, -lift_vec)
+    side_step = 0.5 * CUBE_LEN + SIDE_CLEARANCE
+    side_offset = side_step * side_dir
+
+    g_detour_out = translate_pose(g_lift_after_1, side_offset)
+    g_detour_to_opp = cartesian_target(g_detour_out, push_dir, CUBE_LEN)
+    g_opp_above = translate_pose(g_detour_to_opp, -side_offset)
+
+    g_opp_contact = translate_pose(g_opp_above, -lift_vec)
     g_push_2_end = cartesian_target(g_opp_contact, opp_dir, PUSH_DISTANCE)
     g_retreat = translate_pose(g_push_2_end, lift_vec)
 
     return [
-        ("push_left_end", g_push_1_end),
-        ("lift_after_left", g_lift_after_1),
-        ("swing_to_right", g_swing_to_opp),
-        ("right_contact", g_opp_contact),
-        ("push_right_end", g_push_2_end),
+        ("push_1_end", g_push_1_end),
+        ("lift_after_push_1", g_lift_after_1),
+        ("detour_out", g_detour_out),
+        ("detour_to_opp", g_detour_to_opp),
+        ("opp_above", g_opp_above),
+        ("opp_contact", g_opp_contact),
+        ("push_2_end", g_push_2_end),
         ("retreat", g_retreat),
     ]
 
@@ -471,6 +580,12 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
                 returned_home = True
 
     try:
+        if not SIMULATION_MODE:
+            print("\nTeaching workflow (per PDF):")
+            print("  1) Robot switches to Freedrive. Move to start pose with pendant.")
+            print("  2) Press ENTER to record joint angles.")
+            print("  3) Control returns to ROS and the plan runs automatically.\n")
+
         q_start = teach_pose(ur, "start")
         move_to_configuration(ur, q_start)
         ur.activate_pos_control()
@@ -483,8 +598,17 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
         publish_frame("start_pose", g_start_control)
         log_pose_details("Start", g_start_control, g_start_control)
 
-        push_dir = push_direction_from_pose(g_start_control)
-        plan = generate_push_plan(g_start_control, push_dir)
+        # Default push direction: base +Y (per project PDF); override via prompt only if desired.
+        push_dir = PUSH_DIRECTION_BASE.copy()
+        if not SIMPLE_PUSH_PLAN:
+            push_dir = select_push_direction(g_start_control)
+        print(f"Using push direction: {push_dir}")
+
+        plan = (
+            generate_simple_push_plan(g_start_control, push_dir)
+            if SIMPLE_PUSH_PLAN
+            else generate_push_plan(g_start_control, push_dir)
+        )
         print(f"Plan segments: {[name for name, _ in plan]}")
 
         q_curr = q_start_actual
@@ -500,7 +624,14 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
             g_tool0_target = tool0_from_tip(g_control_target, T_tool0_tip)
             n_steps = adaptive_interp_steps(g_control_curr, g_control_target)
 
-            fast_segment = name in {"lift_after_left", "swing_to_right", "retreat"}
+            # Free-space segments can be a bit faster; keep push/contact segments slower.
+            fast_segment = name in {
+                "lift_after_push_1",
+                "detour_out",
+                "detour_to_opp",
+                "opp_above",
+                "retreat",
+            }
             prev_limit = ur.speed_limit
             if fast_segment:
                 ur.speed_limit = FREE_SPEED_LIMIT
@@ -522,7 +653,7 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
             duration = time.time() - start_time
             print(f"[RR] {name}: {n_steps} waypoints, {duration:.2f}s")
 
-            if name == "push_right_end":
+            if name == "push_2_end":
                 push2_actual = g_control_curr
 
         if push2_actual is not None:
