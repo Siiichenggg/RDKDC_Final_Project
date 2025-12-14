@@ -13,7 +13,7 @@ clear; clc;
 %% ---------------- User-editable constants ----------------
 MODE = "real";                 % "real" or "sim"
 HOME_Q = [0; -pi/2; pi/2; -pi/2; -pi/2; 0]; % safe home posture
-PUSH_DIST = 0.03;              % push distance in meters (3 cm)
+PUSH_DIST = 0.16;              % push distance in meters (16 cm)
 DT = 0.05;                     % RR step time (s)
 MAX_STEPS = 800;               % max iterations per RR segment
 POS_TOL = 4e-3;                % 4 mm
@@ -84,7 +84,7 @@ try
     g_end = [R_start, p_end; 0 0 0 1];
 
     [succ1, q_after_first, log1] = rr_move_to_pose( ...
-        ur, q_start, g_end, rrParams, "push forward 3cm", JOINT_LIMITS, Z_MIN);
+        ur, q_start, g_end, rrParams, "push forward 16cm", JOINT_LIMITS, Z_MIN);
     g_end_actual = ur.get_current_transformation();
     fprintf('Reached end of first push (measured):\n');
     disp(g_end_actual);
@@ -95,15 +95,17 @@ try
     % 6) Compute target (2) using end pose
     z_contact = g_start(3,4);
     z_lift = z_contact + LIFT_HEIGHT;
-    approach_shift = CUBE_LEN + SIDE_CLEARANCE + PUSH_DIST;
+    % Reverse push direction for second leg (opposite of first push)
+    rev_dir = -push_dir_base;
+    approach_shift = CUBE_LEN + SIDE_CLEARANCE; % distance to clear cube to far face
 
     % Lift straight up from end
     g_lift_from_end = g_end_actual;
     g_lift_from_end(3,4) = z_lift;
 
     % Move over the cube to the opposite side at lift height
-    p_pre = g_end_actual(1:3,4) + approach_shift * push_dir_base;
-    g_pre_lift = [R_start, p_pre; 0 0 0 1];
+    p_pre = g_end_actual(1:3,4) + approach_shift * rev_dir;
+    g_pre_lift = [R_start, p_pre; 0 0 0 1]; % same orientation, opposite side
     g_pre_lift(3,4) = z_lift;
 
     % Descend to contact height on far side
@@ -111,19 +113,20 @@ try
     g_pre_contact(3,4) = z_contact;
 
     % Final desired pose after pushing back
-    p_final = g_pre_contact(1:3,4) - PUSH_DIST * push_dir_base;
+    p_final = g_pre_contact(1:3,4) + PUSH_DIST * rev_dir;
     g_final = [R_start, p_final; 0 0 0 1];
 
     % 7) Execute second sequence
     fprintf('--- Second segment: reposition for reverse push ---\n');
     [succ2a, q_lift, log2a] = rr_move_to_pose( ...
         ur, q_after_first, g_lift_from_end, rrParams, "lift after push 1", JOINT_LIMITS, Z_MIN);
+    fprintf('Planning far-side approach at position: [%0.4f %0.4f %0.4f] m\n', g_pre_lift(1,4), g_pre_lift(2,4), g_pre_lift(3,4));
     [succ2b, q_over, log2b] = rr_move_to_pose( ...
         ur, q_lift, g_pre_lift, rrParams, "move above far side", JOINT_LIMITS, Z_MIN);
     [succ2c, q_contact, log2c] = rr_move_to_pose( ...
         ur, q_over, g_pre_contact, rrParams, "descend to contact", JOINT_LIMITS, Z_MIN);
     [succ2d, q_final, log2d] = rr_move_to_pose( ...
-        ur, q_contact, g_final, rrParams, "push back 3cm", JOINT_LIMITS, Z_MIN);
+        ur, q_contact, g_final, rrParams, "push back 16cm", JOINT_LIMITS, Z_MIN);
 
     g_final_meas = ur.get_current_transformation();
     fprintf('Reached final target (measured):\n');
