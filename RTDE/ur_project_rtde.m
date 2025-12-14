@@ -5,7 +5,7 @@
 %   - Set MODE="sim" to talk to URSim, or MODE="real" for the physical arm.
 %   - Requires Robotics System Toolbox (loadrobot('universalUR5e')) or will
 %     fall back to a simple DH model. Helper files used: rr_move_to_pose.m,
-%     ur5e_kinematics.m.
+%     ur5e_fkine.m, ur5e_geometric_jacobian.m.
 %   - Tune task constants below; all parameters live in the top block.
 
 clear; clc;
