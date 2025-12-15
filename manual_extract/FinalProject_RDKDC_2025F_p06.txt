@@ -1,0 +1,43 @@
+            RDKDC(EN.530.646)                                                          6
+              2. It is recommended to enable some kind of debugging output, or some kind of callback (print the current
+                status when a certain key is pressed), it will expedite your simulation.
+              3. In real applications there are always a lot of details to consider: the collision between the end-effector
+                and the table surface. Be careful and try not to break anything!
+              4. Modularize your code.
+            Deliverables
+              1. Submitasinglezipfiletitled“FinalProject TEAM# MemberInitials”tothegradescope“FinalProject”,
+                which includes two folders, one with a main script called ur project.m for ROS environment and the
+                other with a main script called ur project rtde.m for RTDE environment . An example of the file name
+                is:
+                “FinalProject TEAM2 AH DC JL MX”, if Annie Huang, Denglin Cheng, Jiacheng Li, and Mengyu
+                Xiao are team 2.
+                In the ur project.m script, the user should be able to choose the method of control: IK-based, or RR-
+                based. Check to verify that the files you hand in run. In the ur project rtde.m, the use can execute
+                RR by hitting the return button. Check to verify that the files you hand in run. You also have the
+                option to create new custom MATLAB/Python files for the project, just make sure that they are well
+                documented and all the necessary files are included in the zip.
+                Make sure your code is clearly documented with sufÏcient comments to make it easy to understand.
+                Sloppy code will not receive full credit.
+                All codes needed to run your program should be in this submission (including any code you made
+                for previous labs!).
+              2. A PDFreport specifying your algorithm (workflow), simulation results, and all other important consid-
+                erations, as well as workload distribution between team members. This report must be submitted to the
+                gradescope “Final Project: Report”. Name the file as “FinalProjectReport TEAM# MemberInitials”.
+                In particular, report errors between the desired location and the actual location during the simulation
+                (this corresponds to both start and target locations). For example let gd = (Rd,rd) ∈ SE(3) be the de-
+                sired start location, and let g = (R,r) ∈ SE(3) be the actual start location that the robot end-effector
+                reaches in your simulation. Then report two errors for this start location as
+                                              q                ⊤
+                                        d   = tr((R−R )(R−R ) )
+                                        SO(3)          d     d
+                                          d 3 = ∥r−rd∥.
+                                          R
+                Do the same for the target location as well. These errors are applied to all three algorithm cases.
+              3. Submission should be done by only one member of your team. The report must clearly state team
+                members, with workload distribution as mentioned earlier.
+              4. We will set up a demo time (presumably Monday, Dec. 15, 2025), so that each team shows their final
+                outcome to the instructor and the TAs. Note that even though the demo session for your group is
+                scheduled before the due date/time of submission, your demo must contain final outcome of the project.
+                If you do not succeed in the demo, your final outcome is not considered complete.
+            References
+            [1] Ryan Keating, UR5 Inverse Kinematics. 2014

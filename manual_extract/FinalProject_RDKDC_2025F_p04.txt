@@ -1,0 +1,29 @@
+                 RDKDC(EN.530.646)                                                                                         4
+                 Note that in all the tasks above, you have to implement the safety check such that the robot does not hit
+                 the table surface, joint limits, and so on.
+                 Extra Task
+                 After you complete the main task above, you are all welcome to try any interesting idea which involves robot
+                 motion using inverse/differential kinematics. You may use available resources or third party libraries (with
+                 approval of the instructor or the TAs due to safety concerns). This will lead to the extra credits. Remember
+                 to COMPLETE THE MAIN TASK before becoming adventurous with the further credit!! Contact TAs if
+                 you need extra help to setup a special environment.
+                 Inverse Kinematics
+                 The function “urInvKin.m” will be provided that calculates all eight possible solutions to the inverse kine-
+                 matics for the UR5(e) at a given frame in the workspace. Several of the solutions will not be practical to
+                 use and you will need to select the “best” solution to move the robot to during your “Inverse Kinematic”
+                 control. Explain this in your report.
+                    1. Input 1: g  (or T6 as defined in [1]), the 4x4 homogeneous transformation matrix.
+                                 06      0
+                    2. Input 2: "ur5" or "ur5e", indicating the controlled robot type.
+                    3. Output: A 6×8 matrix, each column represents one possible solution of joint angles.
+                 Thefunction computes the solutions following the Denavit-Hartenberg (D-H) convention described in [1], i.e.
+                 from the “base link” to “tool0” frames. Therefore, you will either need to redefine your forward kinematics
+                 to match this convention or define the (constant) transformations from the “0” frame in [1] to the “S” frame
+                 and from the “6” frame in [1] to the “T” frame if you would like to reuse results from homework sets and
+                 previous labs. The frame definitions are illustrated in Fig. 5 for your reference. There is also a Test Function
+                 included in the Lab files that will allow you to see the scale of the errors between your forward kinematic
+                 implementation and this inverse kinematic implementation. If you would like to reduce your errors, you may
+                 update your code to use the same DH parameters as were used in [1]. For the UR5e, the frames are defined
+                 the same but the link dimensions are different. Please refer back to Lab 3 for more.
+                     (a) Description of “base link” and “tool0” frames   (b) RVIZ model with “base link” and “tool0” frames
+                                   Figure 5: (a) Geometry of the UR5. (b) The RVIZ Model of the UR5.

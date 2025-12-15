@@ -1,0 +1,18 @@
+                              RDKDC(EN.530.646)                                                                                                                                                                             2
+                                                                              Figure 2: A photo of a foam cube and a white board.
+                              All of which will be somewhere on the lab table inside the workspace of the UR5(e). Note that (1) is to
+                              be taught. However, (2) should be computed based on the last location, denoted as (end) in
+                              Fig. 1, of the robot trajectory to push the cube. This means that you will have to compute the end
+                              points of the second line in your code so that the robot automatically complete the pick-and-draw task. You
+                              have already implemented code to drive the robot to a given position and orientation (pose) in Cartesian
+                              space using Resolved Rate Control. Now you need to develop a complete program that moves the robot
+                              end-effector from the start location to the stop location using the UR5(e).
+                                                                                   Figure 3: A UR5 with a pen gripper and a pen.
+                                                                                          49
+                                                                                         1.929
+                                                                         46
+                                                                        1.811
+                                                       SHOULD      122.28
+                                                       MEASURE     4.814
+                                                                                (a)                                                                                    (b)
+                                                                  Figure 4: A pen gripper with a pen: (a) 2D drawing, (b) 3D shape.

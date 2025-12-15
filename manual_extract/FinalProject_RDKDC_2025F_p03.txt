@@ -1,0 +1,40 @@
+          RDKDC(EN.530.646)                                         3
+          Main Task: Push-And-Place
+          For the final project, you will need to implement a push-and-place task via two interface methods: 1) ROS
+          environment, and 2) MATLAB RTDE environment.
+           1) ROS Environment: You will need to create two implementations of a push-and-place task using the
+             API provided in ur interface. You will need to implement both RR and IK control methods. You
+             can use either Python or MALTAB for this task.
+           2) Matlab RTDE Environment: You will need to create implementations of a push-and-place task
+             using the API provided in MATLAB RTDE interface. For this, you will need to implement only RR
+             control method.
+          For the final demonstration, the start location, (1) in the figure, can be determined by your team, as shown
+          in Fig. 1. Make sure that all necessary locations should be somewhere on the workbench and within the
+          workspace of the UR5(e). Obviously, this means that the start location cannot be hard-coded and you must
+          “teach” it correctly at the start of your program.
+          Youcanusepauseoranother function like waitforbuttonpress, in both interface approaches, to pause the
+          program while you are manually moving the robot around to the start and target locations. Once satisfied
+          with the robot configuration, a simple button press should record the current frame for later use. Be sure
+          to test your program on several different configurations to be sure it is robust.
+          ROSEnvironment:
+          Note that to use freedrive mode, you must first use the function ur.switch to pendant control() to allow
+          the pendant to control the robot. Once you are finished using the pendant, you must switch back to ROS
+          control using the function ur.switch to ros control().
+          So to teach a pose, the workflow would be as follows: call ur.switch to pendant control(), add a pause
+          in your MATLAB or Python script, move the robot to your desired position using freedrive, resume your
+          MATLAB script, read the joint angles using theta=ur.get current joints(), and finally switch back to
+          ROScontrol using ur.switch to ros control().
+          Using the frame locations that you “teach”, you will plan a trajectory for the robot in Cartesian space, i.e.
+          in SE(3). The process should begin and end with the robot in some “home” configuration that you decide
+          is best. Here are two different ways to control the trajectory:
+           1. Resolved-rate control using differential kinematics (RR): Find the desired velocity (or small,
+             differential Cartesian offset), and “pull that back” through the inverse of the Jacobian to find the joint
+             space velocity (increment) that moves you in the right direction.
+           2. Inverse kinematics (IK): Using inverse kinematics, move the robot along the desired Cartesian path
+             by finding the corresponding path in joint space.
+          MATLABRTDEEnvironment:
+          Regarding UR5(e) operation, refer to “Control UR5 from Wyman Computers” in RTDE Instruction Manual.
+          For this environment, you will implement the following control:
+           1. Resolved-rate control using differential kinematics (RR): Find the desired velocity (or small,
+             differential Cartesian offset), and “pull that back” through the inverse of the Jacobian to find the joint
+             space velocity (increment) that moves you in the right direction.
