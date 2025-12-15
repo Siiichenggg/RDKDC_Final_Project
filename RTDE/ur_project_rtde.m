@@ -41,7 +41,9 @@ cfg.freezeWarnIters = 40;   % consecutive iterations before warning
 
 % --- Task parameters (push-and-place) ---
 cfg.pushDist = 0.03;                 % [m] push distance (manual says "about 3 cm")
-cfg.pushDirBase = [1; 0; 0];         % unit vector in base frame (edit if needed)
+% Choose push direction in world/base frame: "+X","-X","+Y","-Y","+Z","-Z"
+cfg.pushAxis = "+X";
+cfg.pushDirBase = [];                % (auto-filled from pushAxis)
 cfg.cubeSide = 0.13;                 % [m] foam cube edge length (user/lab setup dependent)
 cfg.clearance = 0.03;                % [m] extra clearance for re-approach
 cfg.liftHeight = 0.05;               % [m] lift height for repositioning (safety)
@@ -52,6 +54,11 @@ cfg.timeToReturnToStart = 3.0;       % [s] time for returning to taught start
 %  Path setup (avoid ur_rtde_interface shadowing)
 %  =========================
 rtde_path_setup();
+
+% Resolve world/base translation axis to a numeric unit vector
+cfg.pushDirBase = rtde_unitvec_from_axis(cfg.pushAxis);
+fprintf("World push axis = %s => pushDirBase = [%.0f %.0f %.0f]^T\n", ...
+    cfg.pushAxis, cfg.pushDirBase(1), cfg.pushDirBase(2), cfg.pushDirBase(3));
 
 %% =========================
 %  Connect (required: ur = ur_rtde_interface(mode, ip); )
