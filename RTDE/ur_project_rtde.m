@@ -25,6 +25,7 @@ cfg.posTol = 0.005;         % [m] translation tolerance
 cfg.rotTol = 5*pi/180;      % [rad] rotation tolerance
 cfg.maxSteps = 600;         % max RR iterations per segment
 cfg.dampLambda = 0.03;      % DLS damping (helps near singularities)
+cfg.rotWeight = 3.0;        % dimensionless weight on orientation error (keeps world orientation fixed)
 
 % --- Safety / limits ---
 cfg.dqMax = 0.03;           % [rad/step] max joint increment magnitude (scaled)
@@ -67,6 +68,7 @@ cleanupObj = onCleanup(@() delete(ur));
 %  Teach Start Pose (must not be hard-coded)
 %  =========================
 [q_start, g_start] = rtde_teach_start_pose(ur, cfg.robotType);
+cfg.R_ref = g_start(1:3, 1:3); % keep world orientation equal to taught start orientation
 
 fprintf("\nRecorded start joint config (rad):\n");
 disp(q_start);

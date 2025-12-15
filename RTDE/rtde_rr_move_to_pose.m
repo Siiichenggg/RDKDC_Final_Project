@@ -61,6 +61,9 @@ for k = 1:cfg.maxSteps
 
     g_error = FINV(g_desired) * g_current;
     xi = rtde_getXi(g_error); % [v; w] body error (un-normalized)
+    if isfield(cfg, 'rotWeight') && ~isempty(cfg.rotWeight) && isfinite(cfg.rotWeight)
+        xi(4:6) = cfg.rotWeight * xi(4:6);
+    end
 
     posErr = norm(xi(1:3));
     rotErr = norm(xi(4:6));

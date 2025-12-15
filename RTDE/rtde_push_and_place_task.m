@@ -13,13 +13,16 @@ if norm(pushDir) < 1e-9
 end
 pushDir = pushDir / norm(pushDir);
 
+% Keep world orientation fixed to the taught start orientation
+R_ref = g_start(1:3, 1:3);
+
 % Return to taught start pose deterministically
 ur.move_joints(q_start, cfg.timeToReturnToStart);
 pause(cfg.timeToReturnToStart);
 
 % Segment A: Push cube ~3cm (start -> end)
-g_push_end = g_start;
-g_push_end(1:3,4) = g_start(1:3,4) + cfg.pushDist * pushDir;
+p_push_end = g_start(1:3,4) + cfg.pushDist * pushDir;
+g_push_end = rtde_make_pose(R_ref, p_push_end);
 
 segA = rtde_rr_move_to_pose(ur, g_push_end, cfg, "push_forward");
 out.segments = segA;
@@ -33,8 +36,9 @@ g_end = rtde_urFwdKin(q_end, cfg.robotType);
 
 % Segment B: Lift (safety) before re-approach to other side
 if cfg.liftHeight > 0
-    g_lift = g_end;
-    g_lift(3,4) = g_end(3,4) + cfg.liftHeight;
+    p_lift = g_end(1:3,4);
+    p_lift(3) = g_end(3,4) + cfg.liftHeight;
+    g_lift = rtde_make_pose(R_ref, p_lift);
     segB = rtde_rr_move_to_pose(ur, g_lift, cfg, "lift");
     out.segments(end+1,1) = segB;
     if ~segB.converged
@@ -51,8 +55,8 @@ end
 q_afterLift = out.segments(end).q_final;
 g_afterLift = rtde_urFwdKin(q_afterLift, cfg.robotType);
 
-g_target2 = g_afterLift;
-g_target2(1:3,4) = g_afterLift(1:3,4) + cfg.backApproachExtra * pushDir;
+p_target2 = g_afterLift(1:3,4) + cfg.backApproachExtra * pushDir;
+g_target2 = rtde_make_pose(R_ref, p_target2);
 
 segC = rtde_rr_move_to_pose(ur, g_target2, cfg, "move_to_other_side");
 out.segments(end+1,1) = segC;
@@ -65,8 +69,9 @@ end
 q_afterMove = segC.q_final;
 g_afterMove = rtde_urFwdKin(q_afterMove, cfg.robotType);
 
-g_lower = g_afterMove;
-g_lower(3,4) = g_end(3,4);
+p_lower = g_afterMove(1:3,4);
+p_lower(3) = g_end(3,4);
+g_lower = rtde_make_pose(R_ref, p_lower);
 segD = rtde_rr_move_to_pose(ur, g_lower, cfg, "lower_to_surface");
 out.segments(end+1,1) = segD;
 if ~segD.converged
@@ -78,8 +83,8 @@ end
 q_contact2 = segD.q_final;
 g_contact2 = rtde_urFwdKin(q_contact2, cfg.robotType);
 
-g_push_back_end = g_contact2;
-g_push_back_end(1:3,4) = g_contact2(1:3,4) - cfg.pushDist * pushDir;
+p_push_back_end = g_contact2(1:3,4) - cfg.pushDist * pushDir;
+g_push_back_end = rtde_make_pose(R_ref, p_push_back_end);
 
 segE = rtde_rr_move_to_pose(ur, g_push_back_end, cfg, "push_back");
 out.segments(end+1,1) = segE;
