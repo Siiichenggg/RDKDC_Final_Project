@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import time
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
-from rclpy.duration import Duration
-from rclpy.time import Time
-from tf_transformations import quaternion_matrix
 
 import rr_control as rr
 from IK_utils import urInvKin
 from tf_frame import tf_frame
 from ur_interface import UrInterface
+from control import urFwdKin
 
 
 class IKError(RuntimeError):
@@ -53,45 +51,6 @@ def _pick_ik_solution(
     return q_solutions[:, best_idx].copy(), best_idx, costs
 
 
-def _lookup_transform_matrix(
-    target_frame: str,
-    source_frame: str,
-    timeout_s: float = 2.0,
-) -> np.ndarray:
-    """Return g_target_source using TF (4x4)."""
-
-    tf_buffer = tf_frame.get_tf_tree()
-    if tf_buffer is None:
-        raise RuntimeError("TF buffer unavailable.")
-
-    transform = tf_buffer.lookup_transform(
-        target_frame,
-        source_frame,
-        Time(),
-        timeout=Duration(seconds=float(timeout_s)),
-    )
-
-    q = transform.transform.rotation
-    t = transform.transform.translation
-    g = quaternion_matrix([q.x, q.y, q.z, q.w])  # (x, y, z, w)
-    g[:3, 3] = np.array([t.x, t.y, t.z], dtype=float)
-    return g
-
-
-def _get_g_base_tool0(timeout_s: float = 2.0) -> np.ndarray:
-    """Robustly lookup base_link->tool0 transform."""
-
-    candidates = ("tool0", "tool0_controller", "tcp", "tool0_tcp")
-    last_exc: Optional[Exception] = None
-    for source in candidates:
-        try:
-            return _lookup_transform_matrix("base_link", source, timeout_s=timeout_s)
-        except Exception as exc:
-            last_exc = exc
-            continue
-    raise RuntimeError(f"Failed to lookup base_link->tool0 TF (tried {candidates}): {last_exc}")
-
-
 def _interp_cartesian_segment(g_start: np.ndarray, g_end: np.ndarray, n_steps: int) -> List[np.ndarray]:
     """Straight-line interpolation in translation with fixed orientation."""
 
@@ -105,33 +64,11 @@ def _interp_cartesian_segment(g_start: np.ndarray, g_end: np.ndarray, n_steps: i
     return poses
 
 
-def _ik_solve_cartesian_waypoints(
-    g_waypoints_tool0: Sequence[np.ndarray],
-    q_seed: np.ndarray,
-    robot_type: str,
-    weights: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """Solve IK for a sequence of tool0 poses, choosing a continuous branch."""
-
-    q_prev = np.asarray(q_seed, dtype=float).reshape(6)
-    q_traj = np.zeros((6, len(g_waypoints_tool0)), dtype=float)
-
-    for i, g_des in enumerate(g_waypoints_tool0):
-        q_solutions = urInvKin(np.asarray(g_des, dtype=float), robot_type=robot_type)
-        q_i, _, _ = _pick_ik_solution(q_solutions, q_prev, weights=weights)
-        rr.check_joint_limits(q_i)
-        rr.check_table_clearance(rr.tip_from_tool0(g_des))
-        q_traj[:, i] = q_i
-        q_prev = q_i
-
-    return q_traj
-
-
 def _time_intervals_for_traj(
     q_waypoints: np.ndarray,
     q_start: np.ndarray,
     speed_limit: float,
-    min_dt: float = 0.08,
+    min_dt: float,
 ) -> List[float]:
     """Generate per-waypoint timing to respect a joint-speed limit."""
 
@@ -150,16 +87,62 @@ def _time_intervals_for_traj(
     return times
 
 
-def _execute_joint_trajectory(
+def _steps_for_segment(g_start: np.ndarray, g_target: np.ndarray) -> int:
+    """Choose waypoint count based on RR tolerances (mirrors RR params)."""
+
+    dist = float(np.linalg.norm(g_target[:3, 3] - g_start[:3, 3]))
+    step = float(max(1e-4, rr.RR_POS_TOL))
+    n_steps = int(max(2, np.ceil(dist / step) + 1))
+    return min(n_steps, 200)
+
+
+def ik_move_to_pose(
     ur: UrInterface,
-    q_waypoints: np.ndarray,
-    time_intervals: Sequence[float],
-) -> None:
-    """Send the trajectory and wait for completion."""
+    q_seed: np.ndarray,
+    g_target_tool0: np.ndarray,
+    robot_type: str = rr.ROBOT_TYPE,
+    weights: Optional[np.ndarray] = None,
+    speed_margin: float = rr.POS_SPEED_MARGIN,
+) -> np.ndarray:
+    """Move from current pose to ``g_target_tool0`` using IK waypoints."""
 
     ur.activate_pos_control()
+    q_curr = ur.get_current_joints().astype(float).copy()
+    rr.check_joint_limits(q_curr)
+
+    g_curr = urFwdKin(q_curr, robot_type)
+    rr.check_table_clearance(g_curr)
+
+    g_target_tool0 = np.asarray(g_target_tool0, dtype=float)
+    if g_target_tool0.shape != (4, 4):
+        raise ValueError("g_target_tool0 must be a 4x4 matrix.")
+    rr.check_table_clearance(g_target_tool0)
+
+    n_steps = _steps_for_segment(g_curr, g_target_tool0)
+    waypoints_tool0 = _interp_cartesian_segment(g_curr, g_target_tool0, n_steps)
+
+    q_prev = np.asarray(q_seed, dtype=float).reshape(6).copy()
+    q_goals: List[np.ndarray] = []
+    for g_des in waypoints_tool0[1:]:
+        q_solutions = urInvKin(g_des, robot_type=robot_type)
+        q_i, _, _ = _pick_ik_solution(q_solutions, q_prev, weights=weights)
+        rr.check_joint_limits(q_i)
+        g_fk = urFwdKin(q_i, robot_type)
+        rr.check_table_clearance(g_fk)
+        q_goals.append(q_i)
+        q_prev = q_i
+
+    if not q_goals:
+        return q_curr
+
+    q_waypoints = np.stack(q_goals, axis=1)  # 6xN
+    margin = max(0.1, min(float(speed_margin), 1.0))
+    speed_limit = float(ur.speed_limit) * margin
+    time_intervals = _time_intervals_for_traj(q_waypoints, q_curr, speed_limit=speed_limit, min_dt=rr.RR_DT)
+
     ur.move_joints(q_waypoints, time_intervals=list(time_intervals))
     time.sleep(float(np.sum(time_intervals)) + 0.2)
+    return ur.get_current_joints()
 
 
 def run_ik_mode(ur: UrInterface, home_q: np.ndarray) -> None:
@@ -178,60 +161,79 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray) -> None:
     try:
         q_start = rr.teach_pose(ur, "start")
         rr.move_to_configuration(ur, q_start)
-        q_curr = ur.get_current_joints()
 
-        g_start_tool0 = _get_g_base_tool0()
-        g_start_contact = rr.tip_from_tool0(g_start_tool0)
+        ur.activate_pos_control()
+        g_start = urFwdKin(q_start, rr.ROBOT_TYPE)
+        q_start_actual = ur.get_current_joints()
+        g_start_actual = urFwdKin(q_start_actual, rr.ROBOT_TYPE)
+
+        g_start_contact = rr.tip_from_tool0(g_start_actual)
         rr.publish_frame("start_pose", g_start_contact)
+        rr.log_pose_details("Start", rr.tip_from_tool0(g_start), g_start_contact)
 
-        push_dir_base = rr.compute_push_dir_base(rr.PUSH_DIR_INPUT, rr.PUSH_DIR_FRAME)
         lift_vec = np.array([0.0, 0.0, rr.LIFT_HEIGHT])
+        push_dir_base = rr.compute_push_dir_base(rr.PUSH_DIR_INPUT, rr.PUSH_DIR_FRAME)
+        print(f"[PUSH] frame={rr.PUSH_DIR_FRAME} input={rr.PUSH_DIR_INPUT}")
+        print(f"[PUSH] push_dir_base(planar)={push_dir_base}")
+
+        def safe_ik_move(q_from: np.ndarray, g_target_tool0: np.ndarray) -> np.ndarray:
+            try:
+                weights = np.array([1.0, 1.0, 1.0, 0.6, 0.6, 0.6])
+                return ik_move_to_pose(
+                    ur,
+                    q_seed=q_from,
+                    g_target_tool0=g_target_tool0,
+                    robot_type=rr.ROBOT_TYPE,
+                    weights=weights,
+                    speed_margin=rr.POS_SPEED_MARGIN,
+                )
+            except rr.JointLimitError as exc:
+                print(f"Joint limit reached: {exc}. Returning home.")
+                go_home()
+                raise
 
         g_end1_contact = rr.cartesian_target(g_start_contact, push_dir_base, rr.PUSH_DISTANCE)
+        g_end1 = rr.tool0_from_tip(g_end1_contact)
         rr.publish_frame("push1_end", g_end1_contact)
-
-        segments_contact: List[Tuple[str, np.ndarray, np.ndarray, int]] = []
-        segments_contact.append(("push1", g_start_contact, g_end1_contact, 25))
+        q_curr = safe_ik_move(q_start_actual, g_end1)
 
         g_end1_up_contact = rr.translate_pose(g_end1_contact, lift_vec)
         g_front_above_contact = rr.cartesian_target(g_end1_up_contact, push_dir_base, rr.CUBE_LEN)
         g_contact2 = rr.translate_pose(g_front_above_contact, -lift_vec)
         rr.publish_frame("contact2_pose", g_contact2)
 
-        segments_contact.append(("lift1", g_end1_contact, g_end1_up_contact, 20))
-        segments_contact.append(("move_over", g_end1_up_contact, g_front_above_contact, 25))
-        segments_contact.append(("down2", g_front_above_contact, g_contact2, 20))
+        free_waypoints = (
+            (rr.tool0_from_tip(g_end1_up_contact), True),
+            (rr.tool0_from_tip(g_front_above_contact), True),
+            (rr.tool0_from_tip(g_contact2), False),
+        )
+        for waypoint, fast_speed in free_waypoints:
+            prev_limit = ur.speed_limit
+            if fast_speed:
+                ur.speed_limit = rr.FREE_SPEED_LIMIT
+            try:
+                q_curr = safe_ik_move(q_curr, waypoint)
+            finally:
+                ur.speed_limit = prev_limit
 
         g_end2_contact = rr.cartesian_target(g_contact2, -push_dir_base, rr.PUSH_DISTANCE + 0.1)
+        g_end2 = rr.tool0_from_tip(g_end2_contact)
         rr.publish_frame("push2_end", g_end2_contact)
-        segments_contact.append(("push2", g_contact2, g_end2_contact, 35))
-
-        weights = np.array([1.0, 1.0, 1.0, 0.6, 0.6, 0.6])
-
-        for label, g0_contact, g1_contact, n_steps in segments_contact:
-            g0_tool0 = rr.tool0_from_tip(g0_contact)
-            g1_tool0 = rr.tool0_from_tip(g1_contact)
-
-            waypoints_tool0 = _interp_cartesian_segment(g0_tool0, g1_tool0, n_steps)
-            q_waypoints = _ik_solve_cartesian_waypoints(waypoints_tool0, q_curr, rr.ROBOT_TYPE, weights=weights)
-
-            speed_limit = ur.speed_limit * rr.POS_SPEED_MARGIN
-            time_intervals = _time_intervals_for_traj(q_waypoints, q_curr, speed_limit=speed_limit, min_dt=0.08)
-            print(f"[IK] Executing segment '{label}' with {q_waypoints.shape[1]} waypoints (T={sum(time_intervals):.2f}s)")
-            _execute_joint_trajectory(ur, q_waypoints, time_intervals)
-
-            q_curr = ur.get_current_joints()
-
+        q_end_final = safe_ik_move(q_curr, g_end2)
+        g_target_actual = urFwdKin(q_end_final, rr.ROBOT_TYPE)
+        rr.log_pose_details("Target", g_end2_contact, rr.tip_from_tool0(g_target_actual))
         print("IK-based push-and-place completed.")
+        print(rr.tip_from_tool0(g_start_actual)[:3, 3] - g_start_actual[:3, 3])
 
     except rr.JointLimitError as exc:
-        print(f"IK mode aborted due to joint limit: {exc}")
-        go_home()
-    except IKError as exc:
-        print(f"IK mode aborted due to IK failure: {exc}")
+        print(f"IK mode aborted due to error: {exc}")
         go_home()
     except Exception as exc:
         print(f"IK mode aborted due to error: {exc}")
+        try:
+            ur.activate_pos_control()
+        except Exception:
+            pass
         go_home()
     finally:
         tf_frame.shutdown()
