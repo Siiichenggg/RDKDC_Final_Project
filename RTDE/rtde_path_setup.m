@@ -28,5 +28,18 @@ if isempty(resolved) || isempty(strfind(resolved, expected))
 end
 
 dirs = struct('thisDir', thisDir, 'matlabDir', matlabDir, 'helperDir', helperDir);
-end
 
+% Verify required kinematics helpers exist on path (keeps failures actionable).
+requiredFns = {'urGetScrews','EXPCF','EXPCR','SKEW3','adjoint','FINV'};
+missing = {};
+for i = 1:numel(requiredFns)
+    if isempty(which(requiredFns{i}))
+        missing{end+1} = requiredFns{i}; %#ok<AGROW>
+    end
+end
+if ~isempty(missing)
+    error(['Missing required helper functions on MATLAB path: %s\n' ...
+           'Expected to find them under:\n  %s\n  %s\n'], ...
+          strjoin(missing, ', '), matlabDir, helperDir);
+end
+end

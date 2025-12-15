@@ -60,7 +60,7 @@ for k = 1:cfg.maxSteps
     end
 
     g_error = FINV(g_desired) * g_current;
-    xi = getXi(g_error); % [v; w] body error (un-normalized)
+    xi = rtde_getXi(g_error); % [v; w] body error (un-normalized)
 
     posErr = norm(xi(1:3));
     rotErr = norm(xi(4:6));
