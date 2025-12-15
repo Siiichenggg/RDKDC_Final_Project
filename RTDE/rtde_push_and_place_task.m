@@ -51,11 +51,11 @@ pause(cfg.timeToReturnToStart);
 segC = struct('segment',"return_to_home",'converged',true,'steps',0,'posErr',0,'rotErr',0,'sigmaMin',NaN,'condJ',NaN,'maxAbsDq',0,'q_final',q_home,'msg',"Returned to UR5e home position");
 out.segments(end+1,1) = segC;
 
-% Segment D: Compute target position (2) for push-back based on (end) position
-% Manual requires: position (2) should be computed based on the last location (end)
-% Position (2) is on the other side of the cube from position (end)
-p_target2 = g_end(1:3,4) + cfg.backApproachExtra * pushDir;
-p_target2(3) = g_end(3,4); % Same height as the end position
+% Segment D: Compute target position (2) for push-back
+% Position (2) is: start position (1) + cube side length (13cm) along push direction
+% This positions the robot on the other side of the cube
+p_target2 = g_start(1:3,4) + cfg.cubeSide * pushDir;
+p_target2(3) = g_start(3,4); % Same height as the start position
 g_target2 = rtde_make_pose(R_ref, p_target2);
 
 segD = rtde_rr_move_to_pose(ur, g_target2, cfg, "move_to_other_side");
