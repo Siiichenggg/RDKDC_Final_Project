@@ -36,6 +36,7 @@ def _select_best_solution(
     weights: Optional[Sequence[float]] = None,
     wrist_singularity_margin: float = 0.12,
     clearance_fallback_margin: float = 0.005,
+    max_joint_step: float = np.deg2rad(90.0),
 ) -> Tuple[np.ndarray, int]:
     """Pick the IK solution closest to q_prev that also passes safety checks.
 
@@ -76,6 +77,23 @@ def _select_best_solution(
 
         dq = _wrap_to_pi(q_raw - q_prev)
         q_cand = q_prev + dq  # unwrap to remain closest to q_prev (2π-invariant)
+
+        max_step = float(np.max(np.abs(dq)))
+        if max_step > max_joint_step:
+            rejected_count += 1
+            all_costs.append((col, float("inf"), f"rejected(TooFar>{np.rad2deg(max_joint_step):.0f}deg)"))
+            rejected_info.append(
+                {
+                    "col": col,
+                    "cost": float(np.sum(np.abs(dq))),
+                    "max_step": max_step,
+                    "reason": "TooFar",
+                    "clearance": None,
+                    "clearance_frame": "tip" if rr.USE_PEN_TIP else "tool0",
+                    "q": q_cand,
+                }
+            )
+            continue
 
         weighted_step = weights_arr * np.abs(dq)
         l1_cost = float(np.sum(weighted_step))
