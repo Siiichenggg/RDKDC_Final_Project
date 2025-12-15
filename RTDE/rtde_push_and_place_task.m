@@ -43,34 +43,39 @@ if ~segB.converged
     return;
 end
 
-% Segment C: Return to UR5e default home position
-fprintf("\n=== Returning to UR5e home position ===\n");
-q_home = [0, -pi/2, 0, -pi/2, 0, 0]'; % UR5e default home position
-ur.move_joints(q_home, cfg.timeToReturnToStart);
-pause(cfg.timeToReturnToStart);
-segC = struct('segment',"return_to_home",'converged',true,'steps',0,'posErr',0,'rotErr',0,'sigmaMin',NaN,'condJ',NaN,'maxAbsDq',0,'q_final',q_home,'msg',"Returned to UR5e home position");
-out.segments(end+1,1) = segC;
+% Segment C: Lift to position (1) above (10cm) - safe intermediate point
+p_start_above = g_start(1:3,4);
+p_start_above(3) = g_start(3,4) + 0.10; % 10cm above position (1)
+g_start_above = rtde_make_pose(R_ref, p_start_above);
 
-% Segment D: Move to position (2) via safe overhead path (avoid collision with cube)
-% Position (2) is: start position (1) + cube side length (13cm) along push direction
-% First, approach from above to avoid hitting the cube
-p_target2_above = g_start(1:3,4) + cfg.cubeSide * pushDir;
-p_target2_above(3) = g_start(3,4) + 0.10; % Approach from above (10cm clearance for safety)
+fprintf("\n=== Lifting to position (1) above (safe intermediate point) ===\n");
+segC = rtde_rr_move_to_pose(ur, g_start_above, cfg, "lift_to_start_above");
+out.segments(end+1,1) = segC;
+if ~segC.converged
+    out.msg = "Failed in lift_to_start_above: " + segC.msg;
+    return;
+end
+
+% Segment D: Horizontally translate to position (2) above with 6cm safety compensation
+% Position (2) = g_start + 13cm (cube side) + 6cm (safety compensation) = g_start + 19cm
+p_target2_above = g_start(1:3,4) + (cfg.cubeSide + 2 * cfg.pushDist) * pushDir;
+p_target2_above(3) = g_start(3,4) + 0.10; % 10cm above, same height
 g_target2_above = rtde_make_pose(R_ref, p_target2_above);
 
-fprintf("\n=== Moving to position (2) from above (safe path) ===\n");
-segD = rtde_rr_move_to_pose(ur, g_target2_above, cfg, "approach_above");
+fprintf("\n=== Translating horizontally to position (2) above (with 6cm compensation) ===\n");
+segD = rtde_rr_move_to_pose(ur, g_target2_above, cfg, "translate_to_target2_above");
 out.segments(end+1,1) = segD;
 if ~segD.converged
-    out.msg = "Failed in approach_above: " + segD.msg;
+    out.msg = "Failed in translate_to_target2_above: " + segD.msg;
     return;
 end
 
 % Segment E: Lower to position (2) at contact height
-p_target2 = g_start(1:3,4) + cfg.cubeSide * pushDir;
+p_target2 = g_start(1:3,4) + (cfg.cubeSide + 2 * cfg.pushDist) * pushDir;
 p_target2(3) = g_start(3,4); % Same height as the start position
 g_target2 = rtde_make_pose(R_ref, p_target2);
 
+fprintf("\n=== Lowering to position (2) ===\n");
 segE = rtde_rr_move_to_pose(ur, g_target2, cfg, "lower_to_position2");
 out.segments(end+1,1) = segE;
 if ~segE.converged
@@ -78,14 +83,15 @@ if ~segE.converged
     return;
 end
 
-% Segment F: Push back ~3cm (target2 -> back)
+% Segment F: Push back 6cm (which pushes the cube back 3cm due to 3cm compensation)
 % Manual requirement: push the cube back near the original location
 q_contact2 = segE.q_final;
 g_contact2 = rtde_urFwdKin(q_contact2, cfg.robotType);
 
-p_push_back_end = g_contact2(1:3,4) - cfg.pushDist * pushDir;
+p_push_back_end = g_contact2(1:3,4) - 2 * cfg.pushDist * pushDir; % 6cm = 2 * 3cm
 g_push_back_end = rtde_make_pose(R_ref, p_push_back_end);
 
+fprintf("\n=== Pushing back 6cm (cube moves 3cm back) ===\n");
 segF = rtde_rr_move_to_pose(ur, g_push_back_end, cfg, "push_back");
 out.segments(end+1,1) = segF;
 if ~segF.converged
