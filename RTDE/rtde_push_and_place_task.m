@@ -51,32 +51,45 @@ pause(cfg.timeToReturnToStart);
 segC = struct('segment',"return_to_home",'converged',true,'steps',0,'posErr',0,'rotErr',0,'sigmaMin',NaN,'condJ',NaN,'maxAbsDq',0,'q_final',q_home,'msg',"Returned to UR5e home position");
 out.segments(end+1,1) = segC;
 
-% Segment D: Compute target position (2) for push-back
+% Segment D: Move to position (2) via safe overhead path (avoid collision with cube)
 % Position (2) is: start position (1) + cube side length (13cm) along push direction
-% This positions the robot on the other side of the cube
+% First, approach from above to avoid hitting the cube
+p_target2_above = g_start(1:3,4) + cfg.cubeSide * pushDir;
+p_target2_above(3) = g_start(3,4) + 0.10; % Approach from above (10cm clearance for safety)
+g_target2_above = rtde_make_pose(R_ref, p_target2_above);
+
+fprintf("\n=== Moving to position (2) from above (safe path) ===\n");
+segD = rtde_rr_move_to_pose(ur, g_target2_above, cfg, "approach_above");
+out.segments(end+1,1) = segD;
+if ~segD.converged
+    out.msg = "Failed in approach_above: " + segD.msg;
+    return;
+end
+
+% Segment E: Lower to position (2) at contact height
 p_target2 = g_start(1:3,4) + cfg.cubeSide * pushDir;
 p_target2(3) = g_start(3,4); % Same height as the start position
 g_target2 = rtde_make_pose(R_ref, p_target2);
 
-segD = rtde_rr_move_to_pose(ur, g_target2, cfg, "move_to_other_side");
-out.segments(end+1,1) = segD;
-if ~segD.converged
-    out.msg = "Failed in move_to_other_side: " + segD.msg;
+segE = rtde_rr_move_to_pose(ur, g_target2, cfg, "lower_to_position2");
+out.segments(end+1,1) = segE;
+if ~segE.converged
+    out.msg = "Failed in lower_to_position2: " + segE.msg;
     return;
 end
 
-% Segment E: Push back ~3cm (target2 -> back)
+% Segment F: Push back ~3cm (target2 -> back)
 % Manual requirement: push the cube back near the original location
-q_contact2 = segD.q_final;
+q_contact2 = segE.q_final;
 g_contact2 = rtde_urFwdKin(q_contact2, cfg.robotType);
 
 p_push_back_end = g_contact2(1:3,4) - cfg.pushDist * pushDir;
 g_push_back_end = rtde_make_pose(R_ref, p_push_back_end);
 
-segE = rtde_rr_move_to_pose(ur, g_push_back_end, cfg, "push_back");
-out.segments(end+1,1) = segE;
-if ~segE.converged
-    out.msg = "Failed in push_back: " + segE.msg;
+segF = rtde_rr_move_to_pose(ur, g_push_back_end, cfg, "push_back");
+out.segments(end+1,1) = segF;
+if ~segF.converged
+    out.msg = "Failed in push_back: " + segF.msg;
     return;
 end
 
