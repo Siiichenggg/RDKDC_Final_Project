@@ -48,7 +48,12 @@ def _pick_ik_solution(
     best_idx = int(np.argmin(costs))
     if not np.isfinite(costs[best_idx]):
         raise IKError("No finite IK solution cost found for this pose.")
-    return q_solutions[:, best_idx].copy(), best_idx, costs
+
+    # Make the selected solution continuous with respect to q_ref so the
+    # trajectory controller does not command unnecessary ±2π jumps.
+    q_best = q_solutions[:, best_idx].copy()
+    q_best = q_ref + _wrap_to_pi(q_best - q_ref)
+    return q_best, best_idx, costs
 
 
 def _interp_cartesian_segment(g_start: np.ndarray, g_end: np.ndarray, n_steps: int) -> List[np.ndarray]:
@@ -121,7 +126,11 @@ def ik_move_to_pose(
     n_steps = _steps_for_segment(g_curr, g_target_tool0)
     waypoints_tool0 = _interp_cartesian_segment(g_curr, g_target_tool0, n_steps)
 
-    q_prev = np.asarray(q_seed, dtype=float).reshape(6).copy()
+    # Match RR behavior: always anchor continuity to the measured joints.
+    # q_seed is kept for API compatibility, but the measured q_curr is the
+    # safest reference for selecting/unwraping IK solutions.
+    _ = q_seed
+    q_prev = q_curr.copy()
     q_goals: List[np.ndarray] = []
     for g_des in waypoints_tool0[1:]:
         q_solutions = urInvKin(g_des, robot_type=robot_type)
@@ -225,16 +234,12 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray) -> None:
         print("IK-based push-and-place completed.")
         print(rr.tip_from_tool0(g_start_actual)[:3, 3] - g_start_actual[:3, 3])
 
-    except rr.JointLimitError as exc:
-        print(f"IK mode aborted due to error: {exc}")
-        go_home()
     except Exception as exc:
         print(f"IK mode aborted due to error: {exc}")
         try:
             ur.activate_pos_control()
         except Exception:
             pass
-        go_home()
     finally:
         tf_frame.shutdown()
 
