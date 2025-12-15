@@ -1,161 +1,181 @@
 from __future__ import annotations
 
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
 import rr_control as rr
-from IK_utils import urInvKin
-from tf_frame import tf_frame
-from ur_interface import UrInterface
 from control import urFwdKin
+from IK_utils import urInvKin
 
 
-class IKError(RuntimeError):
-    """Raised when no valid IK solution can be found for a waypoint."""
+class IKNoSolutionError(RuntimeError):
+    """Raised when IK fails or no safe solution can be selected."""
 
 
-def _wrap_to_pi(angle: np.ndarray) -> np.ndarray:
-    """Wrap angles to [-pi, pi)."""
+def _wrap_to_pi(theta: np.ndarray) -> np.ndarray:
+    """Wrap angles to (-pi, pi]."""
 
-    return (angle + np.pi) % (2.0 * np.pi) - np.pi
+    theta = np.asarray(theta, dtype=float)
+    return (theta + np.pi) % (2.0 * np.pi) - np.pi
 
 
-def _pick_ik_solution(
-    q_solutions: np.ndarray,
-    q_ref: np.ndarray,
-    weights: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, int, np.ndarray]:
-    """Pick the closest IK solution (column) to the reference joint vector."""
+def _select_best_solution(theta_6xm: np.ndarray, q_prev: np.ndarray, robot_type: str) -> Tuple[np.ndarray, int]:
+    """Pick the IK solution closest to q_prev that also passes safety checks."""
 
-    if q_solutions.size == 0:
-        raise IKError("No IK solutions returned for this pose.")
+    theta_6xm = np.asarray(theta_6xm, dtype=float)
+    q_prev = np.asarray(q_prev, dtype=float).flatten()
+    if q_prev.size != 6:
+        raise ValueError("q_prev must be a 6-element vector.")
 
-    q_ref = np.asarray(q_ref, dtype=float).reshape(6)
-    if weights is None:
-        weights = np.ones(6)
-    weights = np.asarray(weights, dtype=float).reshape(6)
+    if theta_6xm.size == 0 or theta_6xm.shape[0] != 6:
+        raise IKNoSolutionError("IK returned no candidate solutions.")
 
-    costs = np.full(q_solutions.shape[1], np.inf, dtype=float)
-    for idx in range(q_solutions.shape[1]):
-        qk = q_solutions[:, idx]
-        if not np.isfinite(qk).all():
+    best_cost = float("inf")
+    best_q: Optional[np.ndarray] = None
+    best_idx = -1
+
+    for col in range(theta_6xm.shape[1]):
+        q_raw = theta_6xm[:, col].flatten()
+        if q_raw.size != 6 or not np.all(np.isfinite(q_raw)):
             continue
-        dq = _wrap_to_pi(qk - q_ref)
-        costs[idx] = float(np.sum(weights * np.abs(dq)))
 
-    best_idx = int(np.argmin(costs))
-    if not np.isfinite(costs[best_idx]):
-        raise IKError("No finite IK solution cost found for this pose.")
+        dq = _wrap_to_pi(q_raw - q_prev)
+        q_cand = q_prev + dq  # unwrap to remain closest to q_prev
 
-    # Make the selected solution continuous with respect to q_ref so the
-    # trajectory controller does not command unnecessary ±2π jumps.
-    q_best = q_solutions[:, best_idx].copy()
-    q_best = q_ref + _wrap_to_pi(q_best - q_ref)
-    return q_best, best_idx, costs
+        try:
+            rr.check_joint_limits(q_cand)
+            rr.check_table_clearance(urFwdKin(q_cand, robot_type))
+        except Exception:
+            continue
+
+        cost = float(np.linalg.norm(dq))
+        if cost < best_cost:
+            best_cost = cost
+            best_q = q_cand
+            best_idx = col
+
+    if best_q is None:
+        raise IKNoSolutionError("All IK solutions failed safety checks (joint limits / table clearance).")
+
+    return best_q, best_idx
 
 
-def _interp_cartesian_segment(g_start: np.ndarray, g_end: np.ndarray, n_steps: int) -> List[np.ndarray]:
-    """Straight-line interpolation in translation with fixed orientation."""
+def _interp_cartesian_segment_tool0(g_start: np.ndarray, g_end: np.ndarray, cart_step: float) -> List[np.ndarray]:
+    """Interpolate a straight Cartesian segment (tool0) with fixed orientation."""
 
-    poses: List[np.ndarray] = []
     p0 = g_start[:3, 3]
     p1 = g_end[:3, 3]
-    for s in np.linspace(0.0, 1.0, n_steps):
-        g = np.array(g_start, copy=True)
-        g[:3, 3] = (1.0 - s) * p0 + s * p1
-        poses.append(g)
-    return poses
+    dist = float(np.linalg.norm(p1 - p0))
+    n_steps = max(2, int(np.ceil(dist / max(cart_step, 1e-6))) + 1)
+    return rr.interp_cartesian_segment(g_start, g_end, n_steps)
 
 
-def _time_intervals_for_traj(
-    q_waypoints: np.ndarray,
+def _compute_dt_for_joint_path(
+    ur_speed_limit: float, q_path: Sequence[np.ndarray], base_dt: float, speed_margin: float
+) -> float:
+    """Compute a per-waypoint time step that respects joint-speed constraints."""
+
+    speed_limit = float(max(ur_speed_limit * speed_margin, 1e-6))
+    max_dq = 0.0
+    for q_prev, q_next in zip(q_path[:-1], q_path[1:]):
+        dq = np.max(np.abs(np.asarray(q_next) - np.asarray(q_prev)))
+        if dq > max_dq:
+            max_dq = float(dq)
+    dt_needed = max_dq / speed_limit if max_dq > 0.0 else 0.0
+    return float(max(base_dt, dt_needed))
+
+
+def ik_follow_waypoints_tool0(
+    ur,
+    waypoints_tool0: Sequence[np.ndarray],
     q_start: np.ndarray,
-    speed_limit: float,
-    min_dt: float,
-) -> List[float]:
-    """Generate per-waypoint timing to respect a joint-speed limit."""
-
-    q_prev = np.asarray(q_start, dtype=float).reshape(6)
-    speed_limit = float(speed_limit)
-    if speed_limit <= 0.0:
-        raise ValueError("speed_limit must be positive.")
-
-    times: List[float] = []
-    for i in range(q_waypoints.shape[1]):
-        q_i = q_waypoints[:, i]
-        dq = _wrap_to_pi(q_i - q_prev)
-        dt = max(float(min_dt), float(np.max(np.abs(dq))) / speed_limit)
-        times.append(dt)
-        q_prev = q_i
-    return times
-
-
-def _steps_for_segment(g_start: np.ndarray, g_target: np.ndarray) -> int:
-    """Choose waypoint count based on RR tolerances (mirrors RR params)."""
-
-    dist = float(np.linalg.norm(g_target[:3, 3] - g_start[:3, 3]))
-    step = float(max(1e-4, rr.RR_POS_TOL))
-    n_steps = int(max(2, np.ceil(dist / step) + 1))
-    return min(n_steps, 200)
-
-
-def ik_move_to_pose(
-    ur: UrInterface,
-    q_seed: np.ndarray,
-    g_target_tool0: np.ndarray,
     robot_type: str = rr.ROBOT_TYPE,
-    weights: Optional[np.ndarray] = None,
+    base_dt: float = rr.RR_DT,
+    cart_step: float = rr.RR_POS_TOL,
     speed_margin: float = rr.POS_SPEED_MARGIN,
+    debug: bool = False,
 ) -> np.ndarray:
-    """Move from current pose to ``g_target_tool0`` using IK waypoints."""
+    """Follow a list of tool0 waypoints using IK (closest-solution selection)."""
+
+    if len(waypoints_tool0) == 0:
+        raise ValueError("waypoints_tool0 must be non-empty.")
 
     ur.activate_pos_control()
-    q_curr = ur.get_current_joints().astype(float).copy()
-    rr.check_joint_limits(q_curr)
+    q_prev = np.asarray(q_start, dtype=float).flatten()
+    if q_prev.size != 6:
+        raise ValueError("q_start must be a 6-element vector.")
 
-    g_curr = urFwdKin(q_curr, robot_type)
-    rr.check_table_clearance(g_curr)
+    rr.check_joint_limits(q_prev)
+    rr.check_table_clearance(urFwdKin(q_prev, robot_type))
 
-    g_target_tool0 = np.asarray(g_target_tool0, dtype=float)
-    if g_target_tool0.shape != (4, 4):
-        raise ValueError("g_target_tool0 must be a 4x4 matrix.")
-    rr.check_table_clearance(g_target_tool0)
+    q_path: List[np.ndarray] = [q_prev.copy()]
+    chosen: List[int] = []
 
-    n_steps = _steps_for_segment(g_curr, g_target_tool0)
-    waypoints_tool0 = _interp_cartesian_segment(g_curr, g_target_tool0, n_steps)
+    for k, g_des_tool0 in enumerate(waypoints_tool0):
+        g_des_tool0 = np.asarray(g_des_tool0, dtype=float)
+        if g_des_tool0.shape != (4, 4):
+            raise ValueError("Each waypoint must be a 4x4 SE(3) matrix.")
 
-    # Match RR behavior: always anchor continuity to the measured joints.
-    # q_seed is kept for API compatibility, but the measured q_curr is the
-    # safest reference for selecting/unwraping IK solutions.
-    _ = q_seed
-    q_prev = q_curr.copy()
-    q_goals: List[np.ndarray] = []
-    for g_des in waypoints_tool0[1:]:
-        q_solutions = urInvKin(g_des, robot_type=robot_type)
-        q_i, _, _ = _pick_ik_solution(q_solutions, q_prev, weights=weights)
-        rr.check_joint_limits(q_i)
-        g_fk = urFwdKin(q_i, robot_type)
-        rr.check_table_clearance(g_fk)
-        q_goals.append(q_i)
-        q_prev = q_i
+        theta = urInvKin(g_des_tool0, robot_type)
+        q_next, idx = _select_best_solution(theta, q_prev, robot_type)
+        q_path.append(q_next)
+        chosen.append(idx)
+        q_prev = q_next
 
-    if not q_goals:
-        return q_curr
+        if debug and (k == 0 or k == len(waypoints_tool0) - 1):
+            print(f"[IK] waypoint {k+1}/{len(waypoints_tool0)} selected solution idx={idx}")
 
-    q_waypoints = np.stack(q_goals, axis=1)  # 6xN
-    margin = max(0.1, min(float(speed_margin), 1.0))
-    speed_limit = float(ur.speed_limit) * margin
-    time_intervals = _time_intervals_for_traj(q_waypoints, q_curr, speed_limit=speed_limit, min_dt=rr.RR_DT)
+    dt_exec = _compute_dt_for_joint_path(ur.speed_limit, q_path, base_dt, speed_margin)
+    if debug and dt_exec > base_dt + 1e-9:
+        print(f"[IK] Time scaling: dt {base_dt:.3f} -> {dt_exec:.3f} to respect speed limit.")
 
-    ur.move_joints(q_waypoints, time_intervals=list(time_intervals))
-    time.sleep(float(np.sum(time_intervals)) + 0.2)
+    # Send the joint path as a trajectory (skip the first point: it's the current pose).
+    q_goal = np.column_stack(q_path[1:])
+    time_intervals = [dt_exec] * q_goal.shape[1]
+    ur.move_joints(q_goal, time_intervals=time_intervals)
+    time.sleep(sum(time_intervals))
+
     return ur.get_current_joints()
 
 
-def run_ik_mode(ur: UrInterface, home_q: np.ndarray) -> None:
-    """Execute the push-and-place sequence with IK-based control (ROS environment)."""
+def ik_move_to_pose(
+    ur,
+    q_init: np.ndarray,
+    g_des_tool0: np.ndarray,
+    robot_type: str = rr.ROBOT_TYPE,
+    base_dt: float = rr.RR_DT,
+    cart_step: float = rr.RR_POS_TOL,
+    speed_margin: float = rr.POS_SPEED_MARGIN,
+    debug: bool = False,
+) -> np.ndarray:
+    """Plan a straight Cartesian segment to g_des_tool0 and execute it using IK."""
+
+    print("Starting IK segment...")
+    q_meas = ur.get_current_joints()
+    q_start = np.asarray(q_meas if q_meas is not None else q_init, dtype=float).flatten()
+
+    g_start = urFwdKin(q_start, robot_type)
+    rr.check_table_clearance(g_start)
+    rr.check_joint_limits(q_start)
+
+    waypoints = _interp_cartesian_segment_tool0(g_start, g_des_tool0, cart_step=cart_step)
+    # rr.interp_cartesian_segment includes the starting pose; skip it for IK solve.
+    return ik_follow_waypoints_tool0(
+        ur,
+        waypoints_tool0=waypoints[1:],
+        q_start=q_start,
+        robot_type=robot_type,
+        base_dt=base_dt,
+        cart_step=cart_step,
+        speed_margin=speed_margin,
+        debug=debug,
+    )
+
+
+def run_ik_mode(ur, home_q: np.ndarray) -> None:
+    """Execute the push-and-place sequence using IK tracking."""
 
     returned_home = False
 
@@ -167,11 +187,28 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray) -> None:
             finally:
                 returned_home = True
 
+    def safe_ik_move(q_from: np.ndarray, g_target: np.ndarray) -> np.ndarray:
+        try:
+            return ik_move_to_pose(
+                ur,
+                q_from,
+                g_target,
+                robot_type=rr.ROBOT_TYPE,
+                base_dt=rr.RR_DT,
+                cart_step=rr.RR_POS_TOL,
+                speed_margin=rr.POS_SPEED_MARGIN,
+                debug=False,
+            )
+        except rr.JointLimitError as exc:
+            print(f"Joint limit reached: {exc}. Returning home.")
+            go_home()
+            raise
+
     try:
         q_start = rr.teach_pose(ur, "start")
         rr.move_to_configuration(ur, q_start)
-
         ur.activate_pos_control()
+
         g_start = urFwdKin(q_start, rr.ROBOT_TYPE)
         q_start_actual = ur.get_current_joints()
         g_start_actual = urFwdKin(q_start_actual, rr.ROBOT_TYPE)
@@ -184,22 +221,6 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray) -> None:
         push_dir_base = rr.compute_push_dir_base(rr.PUSH_DIR_INPUT, rr.PUSH_DIR_FRAME)
         print(f"[PUSH] frame={rr.PUSH_DIR_FRAME} input={rr.PUSH_DIR_INPUT}")
         print(f"[PUSH] push_dir_base(planar)={push_dir_base}")
-
-        def safe_ik_move(q_from: np.ndarray, g_target_tool0: np.ndarray) -> np.ndarray:
-            try:
-                weights = np.array([1.0, 1.0, 1.0, 0.6, 0.6, 0.6])
-                return ik_move_to_pose(
-                    ur,
-                    q_seed=q_from,
-                    g_target_tool0=g_target_tool0,
-                    robot_type=rr.ROBOT_TYPE,
-                    weights=weights,
-                    speed_margin=rr.POS_SPEED_MARGIN,
-                )
-            except rr.JointLimitError as exc:
-                print(f"Joint limit reached: {exc}. Returning home.")
-                go_home()
-                raise
 
         g_end1_contact = rr.cartesian_target(g_start_contact, push_dir_base, rr.PUSH_DISTANCE)
         g_end1 = rr.tool0_from_tip(g_end1_contact)
@@ -229,9 +250,10 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray) -> None:
         g_end2 = rr.tool0_from_tip(g_end2_contact)
         rr.publish_frame("push2_end", g_end2_contact)
         q_end_final = safe_ik_move(q_curr, g_end2)
+
         g_target_actual = urFwdKin(q_end_final, rr.ROBOT_TYPE)
         rr.log_pose_details("Target", g_end2_contact, rr.tip_from_tool0(g_target_actual))
-        print("IK-based push-and-place completed.")
+        print("IK push-and-place completed.")
         print(rr.tip_from_tool0(g_start_actual)[:3, 3] - g_start_actual[:3, 3])
 
     except Exception as exc:
@@ -240,8 +262,9 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray) -> None:
             ur.activate_pos_control()
         except Exception:
             pass
+
     finally:
-        tf_frame.shutdown()
+        rr.tf_frame.shutdown()
 
 
-__all__ = ["run_ik_mode", "IKError"]
+__all__ = ["run_ik_mode"]

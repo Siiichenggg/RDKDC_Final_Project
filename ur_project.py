@@ -10,7 +10,11 @@ from ur_interface import UrInterface
 def main() -> None:
     """Simple CLI menu to select the control strategy."""
 
-    ur = UrInterface()
+    try:
+        ur = UrInterface()
+    except Exception as exc:
+        print(f"硬件/ROS 不可用，无法启动 UrInterface: {exc}")
+        sys.exit(1)
     home_q = DEFAULT_HOME_Q.copy()
     print("Using configured home configuration.")
 
