@@ -21,8 +21,19 @@ def _wrap_to_pi(theta: np.ndarray) -> np.ndarray:
     return (theta + np.pi) % (2.0 * np.pi) - np.pi
 
 
-def _select_best_solution(theta_6xm: np.ndarray, q_prev: np.ndarray, robot_type: str, debug: bool = False) -> Tuple[np.ndarray, int]:
-    """Pick the IK solution closest to q_prev that also passes safety checks."""
+def _select_best_solution(
+    theta_6xm: np.ndarray,
+    q_prev: np.ndarray,
+    robot_type: str,
+    debug: bool = False,
+    weights: Optional[Sequence[float]] = None,
+    wrist_singularity_margin: float = 0.12,
+) -> Tuple[np.ndarray, int]:
+    """Pick the IK solution closest to q_prev that also passes safety checks.
+
+    The cost prioritizes small wrapped joint changes (weighted L1) and
+    penalizes solutions that drive wrist pitch (joint 5) near singularity.
+    """
 
     theta_6xm = np.asarray(theta_6xm, dtype=float)
     q_prev = np.asarray(q_prev, dtype=float).flatten()
@@ -32,7 +43,15 @@ def _select_best_solution(theta_6xm: np.ndarray, q_prev: np.ndarray, robot_type:
     if theta_6xm.size == 0 or theta_6xm.shape[0] != 6:
         raise IKNoSolutionError("IK returned no candidate solutions.")
 
+    if weights is None:
+        weights_arr = np.ones(6, dtype=float)
+    else:
+        weights_arr = np.asarray(weights, dtype=float).flatten()
+        if weights_arr.size != 6 or np.any(weights_arr < 0):
+            raise ValueError("weights must be a 6-element nonnegative vector.")
+
     best_cost = float("inf")
+    best_max_step = float("inf")
     best_q: Optional[np.ndarray] = None
     best_idx = -1
     rejected_count = 0
@@ -41,12 +60,23 @@ def _select_best_solution(theta_6xm: np.ndarray, q_prev: np.ndarray, robot_type:
     for col in range(theta_6xm.shape[1]):
         q_raw = theta_6xm[:, col].flatten()
         if q_raw.size != 6 or not np.all(np.isfinite(q_raw)):
+            all_costs.append((col, float("inf"), "invalid"))
             continue
 
         dq = _wrap_to_pi(q_raw - q_prev)
-        q_cand = q_prev + dq  # unwrap to remain closest to q_prev
+        q_cand = q_prev + dq  # unwrap to remain closest to q_prev (2π-invariant)
 
-        cost = float(np.linalg.norm(dq))
+        weighted_step = weights_arr * np.abs(dq)
+        l1_cost = float(np.sum(weighted_step))
+        max_step = float(np.max(np.abs(dq)))
+
+        # Penalize wrist-pitch singularity (joint 5 close to 0 where sin(theta5) ~ 0)
+        wrist_penalty = 0.0
+        sin_t5 = abs(np.sin(q_cand[4]))
+        if sin_t5 < wrist_singularity_margin:
+            wrist_penalty = (wrist_singularity_margin - sin_t5) / max(wrist_singularity_margin, 1e-6)
+
+        cost = l1_cost + 0.2 * max_step + wrist_penalty
         all_costs.append((col, cost, "pending"))
 
         try:
@@ -54,12 +84,13 @@ def _select_best_solution(theta_6xm: np.ndarray, q_prev: np.ndarray, robot_type:
             rr.check_table_clearance(urFwdKin(q_cand, robot_type))
         except Exception as e:
             rejected_count += 1
-            all_costs[-1] = (col, cost, f"rejected({type(e).__name__})")
+            all_costs[-1] = (col, float("inf"), f"rejected({type(e).__name__})")
             continue
 
         all_costs[-1] = (col, cost, "valid")
-        if cost < best_cost:
+        if cost < best_cost or (abs(cost - best_cost) < 1e-9 and max_step < best_max_step):
             best_cost = cost
+            best_max_step = max_step
             best_q = q_cand
             best_idx = col
 
@@ -67,7 +98,7 @@ def _select_best_solution(theta_6xm: np.ndarray, q_prev: np.ndarray, robot_type:
         print(f"[IK_SELECT] Total solutions: {theta_6xm.shape[1]}, Rejected: {rejected_count}, Valid: {theta_6xm.shape[1] - rejected_count}")
         sorted_costs = sorted(all_costs, key=lambda x: x[1])
         for idx, cost, status in sorted_costs[:3]:
-            print(f"  Solution {idx}: cost={cost:.4f} rad, status={status}")
+            print(f"  Solution {idx}: cost={cost:.4f}, status={status}")
         if best_q is not None:
             print(f"  Selected: solution {best_idx} with cost={best_cost:.4f} rad")
             max_joint_move = np.max(np.abs(_wrap_to_pi(best_q - q_prev)))
