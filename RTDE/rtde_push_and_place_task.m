@@ -34,52 +34,39 @@ end
 q_end = segA.q_final;
 g_end = rtde_urFwdKin(q_end, cfg.robotType);
 
-% Segment B: Lift (safety) before re-approach to other side
-if cfg.liftHeight > 0
-    p_lift = g_end(1:3,4);
-    p_lift(3) = g_end(3,4) + cfg.liftHeight;
-    g_lift = rtde_make_pose(R_ref, p_lift);
-    segB = rtde_rr_move_to_pose(ur, g_lift, cfg, "lift");
-    out.segments(end+1,1) = segB;
-    if ~segB.converged
-        out.msg = "Failed in lift: " + segB.msg;
-        return;
-    end
-else
-    segB = struct('segment',"lift",'converged',true,'steps',0,'posErr',0,'rotErr',0,'sigmaMin',NaN,'condJ',NaN,'maxAbsDq',0,'q_final',q_end,'msg',"SKIP");
-    out.segments(end+1,1) = segB;
-end
-
-% Segment C: Move to "target (2)" computed from (end) to other side
-% (computed from last location end, as required)
-q_afterLift = out.segments(end).q_final;
-g_afterLift = rtde_urFwdKin(q_afterLift, cfg.robotType);
-
-p_target2 = g_afterLift(1:3,4) + cfg.backApproachExtra * pushDir;
-g_target2 = rtde_make_pose(R_ref, p_target2);
-
-segC = rtde_rr_move_to_pose(ur, g_target2, cfg, "move_to_other_side");
-out.segments(end+1,1) = segC;
-if ~segC.converged
-    out.msg = "Failed in move_to_other_side: " + segC.msg;
+% Segment B: Return to taught start position (before push)
+fprintf("\n=== Returning to taught start position (before push) ===\n");
+segB = rtde_rr_move_to_pose(ur, g_start, cfg, "return_to_start");
+out.segments(end+1,1) = segB;
+if ~segB.converged
+    out.msg = "Failed in return_to_start: " + segB.msg;
     return;
 end
 
-% Segment D: Lower back near surface (optional, to match taught contact height)
-q_afterMove = segC.q_final;
-g_afterMove = rtde_urFwdKin(q_afterMove, cfg.robotType);
+% Segment C: Return to UR5e default home position
+fprintf("\n=== Returning to UR5e home position ===\n");
+q_home = [0, -pi/2, 0, -pi/2, 0, 0]'; % UR5e default home position
+ur.move_joints(q_home, cfg.timeToReturnToStart);
+pause(cfg.timeToReturnToStart);
+segC = struct('segment',"return_to_home",'converged',true,'steps',0,'posErr',0,'rotErr',0,'sigmaMin',NaN,'condJ',NaN,'maxAbsDq',0,'q_final',q_home,'msg',"Returned to UR5e home position");
+out.segments(end+1,1) = segC;
 
-p_lower = g_afterMove(1:3,4);
-p_lower(3) = g_end(3,4);
-g_lower = rtde_make_pose(R_ref, p_lower);
-segD = rtde_rr_move_to_pose(ur, g_lower, cfg, "lower_to_surface");
+% Segment D: Compute target position (2) for push-back based on (end) position
+% Manual requires: position (2) should be computed based on the last location (end)
+% Position (2) is on the other side of the cube from position (end)
+p_target2 = g_end(1:3,4) + cfg.backApproachExtra * pushDir;
+p_target2(3) = g_end(3,4); % Same height as the end position
+g_target2 = rtde_make_pose(R_ref, p_target2);
+
+segD = rtde_rr_move_to_pose(ur, g_target2, cfg, "move_to_other_side");
 out.segments(end+1,1) = segD;
 if ~segD.converged
-    out.msg = "Failed in lower_to_surface: " + segD.msg;
+    out.msg = "Failed in move_to_other_side: " + segD.msg;
     return;
 end
 
 % Segment E: Push back ~3cm (target2 -> back)
+% Manual requirement: push the cube back near the original location
 q_contact2 = segD.q_final;
 g_contact2 = rtde_urFwdKin(q_contact2, cfg.robotType);
 
