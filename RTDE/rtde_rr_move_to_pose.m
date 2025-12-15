@@ -51,7 +51,7 @@ for k = 1:cfg.maxSteps
         end
     end
 
-    g_current = urFwdKin(q, cfg.robotType);
+    g_current = rtde_urFwdKin(q, cfg.robotType);
     if g_current(3,4) < cfg.zMin
         result.msg = sprintf("ABORT: tool z=%.4f < zMin=%.4f (table safety).", g_current(3,4), cfg.zMin);
         result.q_final = q;
@@ -75,15 +75,17 @@ for k = 1:cfg.maxSteps
         return;
     end
 
-    Jb = urBodyJacobian(q, cfg.robotType);
+    Jb = rtde_urBodyJacobian(q, cfg.robotType);
     s = svd(Jb);
     sigmaMin = s(end);
     result.sigmaMin = sigmaMin;
+    lambda = cfg.dampLambda;
     if sigmaMin < cfg.minSigma
-        result.msg = sprintf("ABORT: singularity risk (sigma_min=%.3e < %.3e).", sigmaMin, cfg.minSigma);
-        result.q_final = q;
-        result.steps = k;
-        return;
+        if mod(k, cfg.logEvery) == 0 || k == 1
+            fprintf("[%s] WARN: near singular (sigma_min=%.3e < %.3e), increasing damping.\n", ...
+                segmentName, sigmaMin, cfg.minSigma);
+        end
+        lambda = max(lambda, 0.15);
     end
 
     condJ = cond(Jb);
@@ -93,7 +95,7 @@ for k = 1:cfg.maxSteps
     end
 
     % Damped least squares pseudo-inverse: J^+ = J' * (J*J' + λ^2 I)^{-1}
-    A = (Jb * Jb.') + (cfg.dampLambda^2) * eye(6);
+    A = (Jb * Jb.') + (lambda^2) * eye(6);
     dq = -(cfg.K * dt) * (Jb.' * (A \ xi));
 
     % Step limiting (scale uniformly)
@@ -133,4 +135,3 @@ end
 result.msg = "ABORT: maxSteps reached without convergence.";
 result.q_final = ur.get_current_joints();
 end
-

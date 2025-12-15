@@ -29,7 +29,7 @@ if ~segA.converged
 end
 
 q_end = segA.q_final;
-g_end = urFwdKin(q_end, cfg.robotType);
+g_end = rtde_urFwdKin(q_end, cfg.robotType);
 
 % Segment B: Lift (safety) before re-approach to other side
 if cfg.liftHeight > 0
@@ -49,7 +49,7 @@ end
 % Segment C: Move to "target (2)" computed from (end) to other side
 % (computed from last location end, as required)
 q_afterLift = out.segments(end).q_final;
-g_afterLift = urFwdKin(q_afterLift, cfg.robotType);
+g_afterLift = rtde_urFwdKin(q_afterLift, cfg.robotType);
 
 g_target2 = g_afterLift;
 g_target2(1:3,4) = g_afterLift(1:3,4) + cfg.backApproachExtra * pushDir;
@@ -63,7 +63,7 @@ end
 
 % Segment D: Lower back near surface (optional, to match taught contact height)
 q_afterMove = segC.q_final;
-g_afterMove = urFwdKin(q_afterMove, cfg.robotType);
+g_afterMove = rtde_urFwdKin(q_afterMove, cfg.robotType);
 
 g_lower = g_afterMove;
 g_lower(3,4) = g_end(3,4);
@@ -76,7 +76,7 @@ end
 
 % Segment E: Push back ~3cm (target2 -> back)
 q_contact2 = segD.q_final;
-g_contact2 = urFwdKin(q_contact2, cfg.robotType);
+g_contact2 = rtde_urFwdKin(q_contact2, cfg.robotType);
 
 g_push_back_end = g_contact2;
 g_push_back_end(1:3,4) = g_contact2(1:3,4) - cfg.pushDist * pushDir;

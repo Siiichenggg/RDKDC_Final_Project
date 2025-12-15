@@ -11,6 +11,5 @@ fprintf("2) Manually move UR5e to the START pose near the cube/board.\n");
 input("3) Press ENTER to record the current joint configuration...", "s");
 
 q_start = ur.get_current_joints();
-g_start = urFwdKin(q_start, robotType);
+g_start = rtde_urFwdKin(q_start, robotType);
 end
-
