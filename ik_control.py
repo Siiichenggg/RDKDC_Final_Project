@@ -4,6 +4,7 @@ import time
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
+from collections import Counter
 
 import rr_control as rr
 from control import urFwdKin
@@ -28,11 +29,14 @@ def _select_best_solution(
     debug: bool = False,
     weights: Optional[Sequence[float]] = None,
     wrist_singularity_margin: float = 0.12,
+    clearance_fallback_margin: float = 0.005,
 ) -> Tuple[np.ndarray, int]:
     """Pick the IK solution closest to q_prev that also passes safety checks.
 
     The cost prioritizes small wrapped joint changes (weighted L1) and
     penalizes solutions that drive wrist pitch (joint 5) near singularity.
+    If all candidates violate table clearance by a tiny margin, fall back
+    to the least-cost one that stays within `clearance_fallback_margin`.
     """
 
     theta_6xm = np.asarray(theta_6xm, dtype=float)
@@ -56,6 +60,7 @@ def _select_best_solution(
     best_idx = -1
     rejected_count = 0
     all_costs = []
+    rejected_info = []
 
     for col in range(theta_6xm.shape[1]):
         q_raw = theta_6xm[:, col].flatten()
@@ -80,11 +85,23 @@ def _select_best_solution(
         all_costs.append((col, cost, "pending"))
 
         try:
+            g_cand = urFwdKin(q_cand, robot_type)
             rr.check_joint_limits(q_cand)
-            rr.check_table_clearance(urFwdKin(q_cand, robot_type))
+            rr.check_table_clearance(g_cand)
         except Exception as e:
             rejected_count += 1
             all_costs[-1] = (col, float("inf"), f"rejected({type(e).__name__})")
+            g_cand = g_cand if "g_cand" in locals() else None
+            rejected_info.append(
+                {
+                    "col": col,
+                    "cost": cost,
+                    "max_step": max_step,
+                    "reason": type(e).__name__,
+                    "clearance": float(g_cand[2, 3]) if g_cand is not None else None,
+                    "q": q_cand,
+                }
+            )
             continue
 
         all_costs[-1] = (col, cost, "valid")
@@ -94,7 +111,7 @@ def _select_best_solution(
             best_q = q_cand
             best_idx = col
 
-    if debug and rejected_count > 0:
+    if debug:
         print(f"[IK_SELECT] Total solutions: {theta_6xm.shape[1]}, Rejected: {rejected_count}, Valid: {theta_6xm.shape[1] - rejected_count}")
         sorted_costs = sorted(all_costs, key=lambda x: x[1])
         for idx, cost, status in sorted_costs[:3]:
@@ -105,7 +122,32 @@ def _select_best_solution(
             print(f"  Max single-joint displacement: {np.rad2deg(max_joint_move):.2f}°")
 
     if best_q is None:
-        raise IKNoSolutionError("All IK solutions failed safety checks (joint limits / table clearance).")
+        # Fallback: allow tiny clearance violations if joint limits are OK.
+        clearance_thresh = rr.TABLE_Z_MIN - clearance_fallback_margin
+        clearance_candidates = [
+            info for info in rejected_info
+            if info["reason"] != "JointLimitError"
+            and info.get("clearance") is not None
+            and info["clearance"] >= clearance_thresh
+        ]
+
+        if clearance_candidates:
+            clearance_candidates.sort(key=lambda x: (x["cost"], x["max_step"]))
+            pick = clearance_candidates[0]
+            best_q = pick["q"]
+            best_idx = pick["col"]
+            if debug:
+                print(
+                    f"[IK_SELECT] No strictly safe solution. "
+                    f"Falling back to idx={best_idx} (clearance {pick['clearance']:.3f} m)"
+                )
+            return best_q, best_idx
+
+        reason_summary = Counter([info["reason"] for info in rejected_info])
+        summary_str = ", ".join(f"{k}:{v}" for k, v in reason_summary.items()) if reason_summary else "none"
+        raise IKNoSolutionError(
+            f"All IK solutions failed safety checks (joint limits / table clearance). Reasons: {summary_str}"
+        )
 
     return best_q, best_idx
 
