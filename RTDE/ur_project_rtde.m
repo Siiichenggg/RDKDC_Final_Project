@@ -39,10 +39,12 @@ cfg.qMeasEps = 2e-4;        % [rad] "q_meas not changing" threshold (inf-norm)
 cfg.freezeWarnIters = 40;   % consecutive iterations before warning
 
 % --- Task parameters (push-and-place) ---
-cfg.pushDist = 0.03;                 % [m] push distance (≈ 3 cm)
+cfg.pushDist = 0.03;                 % [m] push distance (manual says "about 3 cm")
 cfg.pushDirBase = [1; 0; 0];         % unit vector in base frame (edit if needed)
+cfg.cubeSide = 0.13;                 % [m] foam cube edge length (user/lab setup dependent)
+cfg.clearance = 0.03;                % [m] extra clearance for re-approach
 cfg.liftHeight = 0.05;               % [m] lift height for repositioning (safety)
-cfg.backApproachExtra = 0.06;        % [m] extra offset to reach "other side"
+cfg.backApproachExtra = cfg.cubeSide + cfg.clearance; % [m] reach "other side" of cube
 cfg.timeToReturnToStart = 3.0;       % [s] time for returning to taught start
 
 %% =========================
@@ -79,4 +81,3 @@ taskResult = rtde_push_and_place_task(ur, q_start, g_start, cfg);
 
 fprintf("\nTask finished. Summary:\n");
 disp(taskResult);
-
