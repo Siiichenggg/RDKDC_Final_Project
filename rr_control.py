@@ -79,6 +79,8 @@ PUSH_DIR_CHOICES = {
     "-x": np.array([-1.0, 0.0, 0.0]),
     "y": np.array([0.0, 1.0, 0.0]),
     "-y": np.array([0.0, -1.0, 0.0]),
+    "z": np.array([0.0, 0.0, 1.0]),
+    "-z": np.array([0.0, 0.0, -1.0]),
 }
 
 # If True, ask the user to choose a push direction interactively.
@@ -92,6 +94,7 @@ SIMPLE_PUSH_PLAN = bool(int(os.getenv("UR_SIMPLE_PLAN", "0")))
 # If True, lift above the cube and cross straight over it; if False, detour around the cube footprint.
 CROSS_OVER_CUBE = bool(int(os.getenv("UR_CROSS_OVER_CUBE", "1")))
 OVER_CUBE_CLEARANCE = 0.02  # extra height above cube edge when crossing over it
+CLEAR_OVER_BOX = float(os.getenv("UR_CLEAR_OVER_BOX", "0.05"))
 
 
 # ---------------------------------------------------------------------------
@@ -163,25 +166,23 @@ def select_orientation_mode() -> bool:
 
 
 def select_push_direction(g_start_control: np.ndarray) -> np.ndarray:
-    """
-    Choose the push direction, defaulting to base +Y (right in Fig. 1 of the PDF).
-    Operators can also select +X/-X/-Y or derive from the taught pose.
-    """
+    """Choose the push direction in the base frame."""
     print(
         "\n推的方向（都在桌面平面内）：\n"
         "  y    -> 基座坐标系 +Y（默认，按 PDF 图 1 的“向右”）\n"
         "  -y   -> 基座坐标系 -Y\n"
         "  x    -> 基座坐标系 +X\n"
         "  -x   -> 基座坐标系 -X\n"
-        "  start-> 用你示教起始姿态的轴自动推导方向（投影到桌面）\n"
+        "  z/-z -> 仅用于上抬/下压，不建议作为推的主方向\n"
         "提示：如果方向选反了，重新运行选相反方向即可。"
     )
-    resp = input("输入方向 [y/-y/x/-x/start]（回车= y）: ").strip().lower()
+    resp = input("输入方向 [y/-y/x/-x/z/-z]（回车= y）: ").strip().lower()
     if resp == "":
         resp = "y"
     if resp in PUSH_DIR_CHOICES:
         return PUSH_DIR_CHOICES[resp]
-    return push_direction_from_pose(g_start_control)
+    print("未识别输入，默认使用 +Y。")
+    return PUSH_DIRECTION_BASE.copy()
 
 
 def resolve_push_direction(g_start_control: np.ndarray) -> np.ndarray:
@@ -190,7 +191,7 @@ def resolve_push_direction(g_start_control: np.ndarray) -> np.ndarray:
 
     Default: base +Y (PDF 图 1 的“向右”)
     Override:
-      - set UR_PUSH_DIR to one of: y, -y, x, -x, start
+      - set UR_PUSH_DIR to one of: y, -y, x, -x, z, -z
       - or set UR_PROMPT_DIR=1 to ask interactively
     """
     if PROMPT_PUSH_DIR:
@@ -199,8 +200,6 @@ def resolve_push_direction(g_start_control: np.ndarray) -> np.ndarray:
     mode = os.getenv("UR_PUSH_DIR", "y").strip().lower()
     if mode in PUSH_DIR_CHOICES:
         return PUSH_DIR_CHOICES[mode].copy()
-    if mode == "start":
-        return push_direction_from_pose(g_start_control)
     return PUSH_DIRECTION_BASE.copy()
 
 
@@ -217,11 +216,18 @@ def generate_simple_push_plan(g_start_control: np.ndarray, push_dir: np.ndarray)
     n = np.linalg.norm(push_dir)
     if n < 1e-9:
         raise RuntimeError("push_dir must be non-zero for planning.")
-    push_dir = push_dir / n
+    planar_dir = push_dir.copy()
+    planar_dir[2] = 0.0
+    planar_norm = np.linalg.norm(planar_dir)
+    if planar_norm < 1e-9:
+        raise RuntimeError("push_dir must have a non-zero projection in the table plane.")
+    planar_dir = planar_dir / planar_norm
 
-    lift_vec = np.array([0.0, 0.0, LIFT_HEIGHT], dtype=float)
+    contact_z = float(g_start_control[2, 3])
+    safe_z = max(contact_z + float(LIFT_HEIGHT), TABLE_Z_MIN)
+    lift_vec = np.array([0.0, 0.0, safe_z - contact_z], dtype=float)
 
-    g_push_end = cartesian_target(g_start_control, push_dir, PUSH_DISTANCE)
+    g_push_end = cartesian_target(g_start_control, planar_dir, PUSH_DISTANCE)
     g_lift_after_push = translate_pose(g_push_end, lift_vec)
     g_back_over_start = translate_pose(g_start_control, lift_vec)
     g_drop_start = g_start_control
@@ -349,6 +355,45 @@ def log_pose_details(label: str, g_des: np.ndarray, g_actual: np.ndarray) -> Non
     print(f"{label} actual r: {r}")
 
 
+def verify_return_to_start(
+    q_start: np.ndarray,
+    g_start_control: np.ndarray,
+    q_end: np.ndarray,
+    T_tool0_tip: np.ndarray,
+    pos_tol: float = 0.003,
+    ang_tol: float = np.deg2rad(1.0),
+    q_tol: float = 0.01,
+) -> bool:
+    """Check joint and tip pose deltas after returning to the taught start."""
+
+    q_start = np.asarray(q_start, dtype=float).reshape(6)
+    q_end = np.asarray(q_end, dtype=float).reshape(6)
+    joint_err = float(np.max(np.abs(wrap_to_pi(q_end - q_start))))
+
+    g_tool0_end = urFwdKin(q_end, ROBOT_TYPE)
+    g_control_end = g_tool0_end @ T_tool0_tip if USE_PEN_TIP else g_tool0_end
+
+    pos_err = float(np.linalg.norm(g_control_end[:3, 3] - g_start_control[:3, 3]))
+    rot_err = float(np.linalg.norm(rotation_log(g_control_end[:3, :3] @ g_start_control[:3, :3].T)))
+
+    print(
+        f"Return check -> joint max err: {joint_err:.4f} rad, pos err: {pos_err*1000:.2f} mm, orient err: {np.rad2deg(rot_err):.2f} deg"
+    )
+
+    ok = True
+    if joint_err > q_tol:
+        print(f"Joint tolerance exceeded ({joint_err:.4f} > {q_tol:.4f}).")
+        ok = False
+    if pos_err > pos_tol:
+        print(f"Position tolerance exceeded ({pos_err:.4f} m > {pos_tol:.4f}).")
+        ok = False
+    if rot_err > ang_tol:
+        print(f"Orientation tolerance exceeded ({rot_err:.4f} rad > {ang_tol:.4f}).")
+        ok = False
+
+    return ok
+
+
 def rotation_log(R: np.ndarray) -> np.ndarray:
     """Map a rotation matrix to its so(3) vector via the matrix logarithm."""
     R = np.asarray(R, dtype=float)
@@ -470,8 +515,8 @@ def interp_cartesian_segment(g_start: np.ndarray, g_end: np.ndarray, n_steps: in
     poses: List[np.ndarray] = []
     p0 = g_start[:3, 3]
     p1 = g_end[:3, 3]
-    # Use the desired orientation (g_end) so each segment keeps the global target pose.
-    R_fixed = g_end[:3, :3]
+    # Keep the starting orientation to avoid any sudden wrist flip at s=0.
+    R_fixed = g_start[:3, :3]
     for s in np.linspace(0.0, 1.0, n_steps):
         g = np.eye(4)
         g[:3, :3] = R_fixed
@@ -523,73 +568,71 @@ def return_home(ur: UrInterface, home_q: np.ndarray) -> None:
 
 def generate_push_plan(g_start_control: np.ndarray, push_dir: np.ndarray) -> list[tuple[str, np.ndarray]]:
     """
-    Waypoints in the control frame (tool0 or tip):
-    1) push forward by PUSH_DISTANCE (end of first push, "end" in the PDF)
-    2) lift to free-space height
-    3) move to the opposite side of the cube (computed from the first push end)
-    4) descend at the opposite side (target pose "(2)" computed from the first push end)
-    5) push back by PUSH_DISTANCE
-    6) retreat (lift)
+    Up-and-over push-and-return plan in the control frame (tool0 or tip).
+
+    Segments:
+      1) push_1_end          : push forward by PUSH_DISTANCE at contact height
+      2) lift_after_push     : raise to safe_z above the first push end
+      3) cross_over          : slide laterally over the box at safe_z
+      4) down_other_side     : drop to contact height on the opposite side
+      5) push_2_end          : push back by PUSH_DISTANCE (opposite direction)
+      6) retreat_lift        : lift off after the return push
+      7) return_above_origin : move above the taught origin at safe_z
+      8) down_to_origin      : descend to the taught origin
     """
     push_dir = np.asarray(push_dir, dtype=float)
     n = np.linalg.norm(push_dir)
     if n < 1e-9:
         raise RuntimeError("push_dir must be non-zero for planning.")
     push_dir = push_dir / n
-    opp_dir = -push_dir
 
-    lift_height = float(LIFT_HEIGHT)
-    if CROSS_OVER_CUBE:
-        lift_height = max(lift_height, float(CUBE_LEN + OVER_CUBE_CLEARANCE))
-    lift_vec = np.array([0.0, 0.0, lift_height], dtype=float)
+    planar_dir = push_dir.copy()
+    planar_dir[2] = 0.0
+    planar_norm = np.linalg.norm(planar_dir)
+    if planar_norm < 1e-9:
+        raise RuntimeError("push_dir must have a non-zero projection in the table plane.")
+    planar_dir = planar_dir / planar_norm
 
-    g_push_1_end = cartesian_target(g_start_control, push_dir, PUSH_DISTANCE)
-    g_lift_after_1 = translate_pose(g_push_1_end, lift_vec)
-
-    if CROSS_OVER_CUBE:
-        # Lift above the cube and cross straight over it.
-        g_opp_above = cartesian_target(g_lift_after_1, push_dir, CUBE_LEN)
-        detour_waypoints: list[tuple[str, np.ndarray]] = [
-            ("cross_over_cube", g_opp_above),
-        ]
+    z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
+    side_dir = np.cross(z_axis, planar_dir)
+    side_norm = np.linalg.norm(side_dir)
+    if side_norm < 1e-9:
+        side_dir = np.array([1.0, 0.0, 0.0])
     else:
-        # Detour around the cube footprint in the table plane (still lifted).
-        z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
-        side_dir = np.cross(z_axis, push_dir)
-        side_dir[2] = 0.0
-        side_norm = np.linalg.norm(side_dir)
-        if side_norm < 1e-9:
-            raise RuntimeError("push_dir must not be parallel to the Z axis.")
         side_dir = side_dir / side_norm
 
-        side_step = 0.5 * CUBE_LEN + SIDE_CLEARANCE
-        side_offset = side_step * side_dir
+    contact_z = float(g_start_control[2, 3])
+    safe_z = max(contact_z + float(LIFT_HEIGHT), TABLE_Z_MIN)
 
-        g_detour_out = translate_pose(g_lift_after_1, side_offset)
-        g_detour_to_opp = cartesian_target(g_detour_out, push_dir, CUBE_LEN)
-        g_opp_above = translate_pose(g_detour_to_opp, -side_offset)
-        detour_waypoints = [
-            ("detour_out", g_detour_out),
-            ("detour_to_opp", g_detour_to_opp),
-            ("opp_above", g_opp_above),
-        ]
+    def pose_from_position(p: np.ndarray) -> np.ndarray:
+        g = np.eye(4)
+        g[:3, :3] = g_start_control[:3, :3]
+        g[:3, 3] = p
+        return g
 
-    g_opp_contact = translate_pose(g_opp_above, -lift_vec)
-    g_push_2_end = cartesian_target(g_opp_contact, opp_dir, PUSH_DISTANCE)
-    g_retreat = translate_pose(g_push_2_end, lift_vec)
+    p0 = np.array(g_start_control[:3, 3], dtype=float)
+    p1 = p0 + PUSH_DISTANCE * planar_dir
+    p2 = p1.copy()
+    p2[2] = safe_z
+    p3 = p2 + CLEAR_OVER_BOX * side_dir
+    p4 = p3.copy()
+    p4[2] = contact_z
+    p5 = p4 - PUSH_DISTANCE * planar_dir
+    p6 = p5.copy()
+    p6[2] = safe_z
+    p7 = np.array([p0[0], p0[1], safe_z])
+    p8 = p0.copy()
 
     plan: list[tuple[str, np.ndarray]] = [
-        ("push_1_end", g_push_1_end),
-        ("lift_after_push_1", g_lift_after_1),
+        ("push_1_end", pose_from_position(p1)),
+        ("lift_after_push", pose_from_position(p2)),
+        ("cross_over", pose_from_position(p3)),
+        ("down_other_side", pose_from_position(p4)),
+        ("push_2_end", pose_from_position(p5)),
+        ("retreat_lift", pose_from_position(p6)),
+        ("return_above_origin", pose_from_position(p7)),
+        ("down_to_origin", pose_from_position(p8)),
     ]
-    plan.extend(detour_waypoints)
-    plan.extend(
-        [
-            ("opp_contact", g_opp_contact),
-            ("push_2_end", g_push_2_end),
-            ("retreat", g_retreat),
-        ]
-    )
     return plan
 
 
@@ -661,8 +704,10 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
         q_curr = q_start_actual
         g_tool0_curr = g_tool0_start
         g_control_curr = g_start_control
+        g_control_start = np.array(g_start_control, copy=True)
 
         push2_actual = None
+        push2_target = None
 
         for name, g_control_target in plan:
             check_table_clearance(g_control_target)
@@ -673,12 +718,11 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
 
             # Free-space segments can be a bit faster; keep push/contact segments slower.
             fast_segment = name in {
-                "lift_after_push_1",
-                "cross_over_cube",
-                "detour_out",
-                "detour_to_opp",
-                "opp_above",
-                "retreat",
+                "lift_after_push",
+                "cross_over",
+                "retreat_lift",
+                "return_above_origin",
+                "back_over_start",
             }
             prev_limit = ur.speed_limit
             if fast_segment:
@@ -703,9 +747,13 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
 
             if name == "push_2_end":
                 push2_actual = g_control_curr
+                push2_target = g_control_target
 
-        if push2_actual is not None:
-            log_pose_details("Return push end", plan[-2][1], push2_actual)
+        if push2_actual is not None and push2_target is not None:
+            log_pose_details("Return push end", push2_target, push2_actual)
+
+        q_final = ur.get_current_joints().astype(float)
+        verify_return_to_start(q_start_actual, g_control_start, q_final, T_tool0_tip)
 
         print("Resolved-rate push-and-place completed.")
 

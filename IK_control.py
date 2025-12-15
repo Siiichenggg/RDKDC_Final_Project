@@ -46,7 +46,7 @@ def select_best_solution(
         raise RuntimeError("IK: no valid solutions from urInvKin.")
 
     if W is None:
-        W = np.diag([1, 1, 1, 2, 2, 3])
+        W = np.diag([1, 1, 1, 2, 3, 5])
 
     best_q = None
     best_cost = np.inf
@@ -75,8 +75,13 @@ def select_best_solution(
 
         # Penalize large jumps to reduce elbow-flips
         max_jump = float(np.max(np.abs(dq)))
-        if max_jump > np.pi / 2:
-            cost += 5.0 * max_jump
+        if max_jump > np.pi / 3:
+            cost += 8.0 * max_jump
+
+        # Bias away from wrist singularities (joint 5 ~ 0)
+        wrist_angle = abs(q[4])
+        if wrist_angle < 0.08:
+            cost += 100.0 * (0.08 - wrist_angle)
 
         if cost < best_cost:
             best_cost = cost
@@ -98,7 +103,7 @@ def segment_to_joint_traj(
     """Interpolate a Cartesian line in tip space and solve IK for each waypoint."""
     poses_tip = rr.interp_cartesian_segment(g_start_tip, g_end_tip, n_steps)
     q_prev = np.array(q_seed, dtype=float).reshape(6)
-    qs = []
+    qs = [q_prev.copy()]
 
     T_tip_to_tool0 = np.linalg.inv(T_tool0_tip)
 
@@ -194,6 +199,7 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
 
         g_tool0_curr = urFwdKin(q_curr, rr.ROBOT_TYPE)
         g_control_curr = (g_tool0_curr @ T_tool0_tip) if rr.USE_PEN_TIP else g_tool0_curr
+        g_control_start = np.array(g_control_curr, copy=True)
 
         rr.publish_frame("start_pose", g_control_curr)
         rr.log_pose_details("Start", g_control_curr, g_control_curr)
@@ -211,12 +217,11 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
             n_steps = rr.adaptive_interp_steps(g_control_curr, g_control_target)
 
             fast_segment = name in {
-                "lift_after_push_1",
-                "cross_over_cube",
-                "detour_out",
-                "detour_to_opp",
-                "opp_above",
-                "retreat",
+                "lift_after_push",
+                "cross_over",
+                "retreat_lift",
+                "return_above_origin",
+                "back_over_start",
             }
             prev_limit = ur.speed_limit
             if fast_segment:
@@ -245,6 +250,8 @@ def run_ik_mode(ur: UrInterface, home_q: np.ndarray):
             if name == "push_2_end":
                 rr.log_pose_details("Return push end", g_control_target, g_control_curr)
 
+        q_final = ur.get_current_joints().astype(float)
+        rr.verify_return_to_start(q_start, g_control_start, q_final, T_tool0_tip)
         print("IK push-and-place completed.")
 
     except Exception as e:
