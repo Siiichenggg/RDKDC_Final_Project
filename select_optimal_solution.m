@@ -1,4 +1,4 @@
-function [q_star, idx] = findOptimalJoints(Q, q_cur)
+function [q_star, idx] = selectClosestIK(Q, q_cur)
 % Q: 6x8 candidates, q_cur: 6x1
 % returns q_star: 6x1
 
