@@ -96,46 +96,92 @@ def ik_follow_waypoints_tool0(
     cart_step: float = rr.RR_POS_TOL,
     speed_margin: float = rr.POS_SPEED_MARGIN,
     debug: bool = False,
+    max_retries: int = 3,
+    position_tolerance: float = 0.05,
 ) -> np.ndarray:
-    """Follow a list of tool0 waypoints using IK (closest-solution selection)."""
+    """Follow a list of tool0 waypoints using IK with closed-loop feedback.
+
+    Args:
+        ur: Robot interface
+        waypoints_tool0: List of SE(3) poses to follow
+        q_start: Initial joint configuration
+        robot_type: Robot model type
+        base_dt: Base time step for motion
+        cart_step: Cartesian step size
+        speed_margin: Speed scaling factor
+        debug: Enable debug output
+        max_retries: Maximum retry attempts per waypoint if position error exceeds tolerance
+        position_tolerance: Joint space position tolerance (radians)
+
+    Returns:
+        Final joint configuration
+    """
 
     if len(waypoints_tool0) == 0:
         raise ValueError("waypoints_tool0 must be non-empty.")
 
     ur.activate_pos_control()
-    q_prev = np.asarray(q_start, dtype=float).flatten()
-    if q_prev.size != 6:
+    q_current = np.asarray(q_start, dtype=float).flatten()
+    if q_current.size != 6:
         raise ValueError("q_start must be a 6-element vector.")
 
-    rr.check_joint_limits(q_prev)
-    rr.check_table_clearance(urFwdKin(q_prev, robot_type))
+    rr.check_joint_limits(q_current)
+    rr.check_table_clearance(urFwdKin(q_current, robot_type))
 
-    q_path: List[np.ndarray] = [q_prev.copy()]
-    chosen: List[int] = []
-
+    # Execute waypoints one by one with closed-loop feedback
     for k, g_des_tool0 in enumerate(waypoints_tool0):
         g_des_tool0 = np.asarray(g_des_tool0, dtype=float)
         if g_des_tool0.shape != (4, 4):
             raise ValueError("Each waypoint must be a 4x4 SE(3) matrix.")
 
-        theta = urInvKin(g_des_tool0, robot_type)
-        q_next, idx = _select_best_solution(theta, q_prev, robot_type)
-        q_path.append(q_next)
-        chosen.append(idx)
-        q_prev = q_next
+        retry_count = 0
+        reached = False
 
-        if debug and (k == 0 or k == len(waypoints_tool0) - 1):
-            print(f"[IK] waypoint {k+1}/{len(waypoints_tool0)} selected solution idx={idx}")
+        while retry_count <= max_retries and not reached:
+            # Always compute IK from the current actual position
+            if retry_count > 0:
+                q_current = ur.get_current_joints()
 
-    dt_exec = _compute_dt_for_joint_path(ur.speed_limit, q_path, base_dt, speed_margin)
-    if debug and dt_exec > base_dt + 1e-9:
-        print(f"[IK] Time scaling: dt {base_dt:.3f} -> {dt_exec:.3f} to respect speed limit.")
+            # Compute IK solution
+            theta = urInvKin(g_des_tool0, robot_type)
+            q_next, idx = _select_best_solution(theta, q_current, robot_type)
 
-    # Send the joint path as a trajectory (skip the first point: it's the current pose).
-    q_goal = np.column_stack(q_path[1:])
-    time_intervals = [dt_exec] * q_goal.shape[1]
-    ur.move_joints(q_goal, time_intervals=time_intervals)
-    time.sleep(sum(time_intervals))
+            if debug and retry_count == 0 and (k == 0 or k == len(waypoints_tool0) - 1):
+                print(f"[IK] waypoint {k+1}/{len(waypoints_tool0)} selected solution idx={idx}")
+
+            # Compute time step for this segment
+            dt_exec = _compute_dt_for_joint_path(ur.speed_limit, [q_current, q_next], base_dt, speed_margin)
+
+            # Execute this waypoint
+            ur.move_joints(q_next, time_intervals=[dt_exec])
+            time.sleep(dt_exec)
+
+            # Read actual position after execution
+            q_actual = ur.get_current_joints()
+
+            # Compute joint space error
+            joint_error = np.linalg.norm(q_actual - q_next)
+
+            # Check if waypoint is reached
+            if joint_error < position_tolerance:
+                reached = True
+                if debug and retry_count > 0:
+                    print(f"[IK] waypoint {k+1}/{len(waypoints_tool0)} reached after {retry_count} retries")
+            else:
+                retry_count += 1
+                if debug or retry_count > max_retries:
+                    status = "retrying" if retry_count <= max_retries else "continuing"
+                    print(f"[IK] waypoint {k+1}/{len(waypoints_tool0)} error {joint_error:.4f} rad (tolerance {position_tolerance:.4f}), {status}...")
+
+            # Update current position for next iteration
+            q_current = q_actual
+
+        if not reached and debug:
+            print(f"[IK] Warning: waypoint {k+1}/{len(waypoints_tool0)} not fully reached after {max_retries} retries, proceeding to next waypoint")
+
+        if debug and (k == 0 or k == len(waypoints_tool0) - 1 or retry_count > 0):
+            joint_error = np.linalg.norm(q_current - q_next)
+            print(f"[IK] waypoint {k+1}/{len(waypoints_tool0)} final error={joint_error:.4f} rad")
 
     return ur.get_current_joints()
 
@@ -149,8 +195,10 @@ def ik_move_to_pose(
     cart_step: float = rr.RR_POS_TOL,
     speed_margin: float = rr.POS_SPEED_MARGIN,
     debug: bool = False,
+    max_retries: int = 3,
+    position_tolerance: float = 0.05,
 ) -> np.ndarray:
-    """Plan a straight Cartesian segment to g_des_tool0 and execute it using IK."""
+    """Plan a straight Cartesian segment to g_des_tool0 and execute it using IK with closed-loop feedback."""
 
     print("Starting IK segment...")
     q_meas = ur.get_current_joints()
@@ -171,6 +219,8 @@ def ik_move_to_pose(
         cart_step=cart_step,
         speed_margin=speed_margin,
         debug=debug,
+        max_retries=max_retries,
+        position_tolerance=position_tolerance,
     )
 
 
@@ -187,8 +237,19 @@ def run_ik_mode(ur, home_q: np.ndarray) -> None:
             finally:
                 returned_home = True
 
-    def safe_ik_move(q_from: np.ndarray, g_target: np.ndarray) -> np.ndarray:
+    def safe_ik_move(q_from: np.ndarray, g_target: np.ndarray, is_contact: bool = False) -> np.ndarray:
+        """Execute IK move with appropriate settings for contact vs free-space motion.
+
+        Args:
+            q_from: Starting joint configuration
+            g_target: Target pose
+            is_contact: True for contact motion (pushing), False for free-space motion
+        """
         try:
+            # Use more retries and tighter tolerance for contact motion (pushing)
+            max_retries = 5 if is_contact else 2
+            position_tolerance = 0.08 if is_contact else 0.05
+
             return ik_move_to_pose(
                 ur,
                 q_from,
@@ -197,7 +258,9 @@ def run_ik_mode(ur, home_q: np.ndarray) -> None:
                 base_dt=rr.RR_DT,
                 cart_step=rr.RR_POS_TOL,
                 speed_margin=rr.POS_SPEED_MARGIN,
-                debug=False,
+                debug=True,
+                max_retries=max_retries,
+                position_tolerance=position_tolerance,
             )
         except rr.JointLimitError as exc:
             print(f"Joint limit reached: {exc}. Returning home.")
@@ -225,7 +288,8 @@ def run_ik_mode(ur, home_q: np.ndarray) -> None:
         g_end1_contact = rr.cartesian_target(g_start_contact, push_dir_base, rr.PUSH_DISTANCE)
         g_end1 = rr.tool0_from_tip(g_end1_contact)
         rr.publish_frame("push1_end", g_end1_contact)
-        q_curr = safe_ik_move(q_start_actual, g_end1)
+        print("[PUSH] Starting first push (contact motion)...")
+        q_curr = safe_ik_move(q_start_actual, g_end1, is_contact=True)
 
         g_end1_up_contact = rr.translate_pose(g_end1_contact, lift_vec)
         g_front_above_contact = rr.cartesian_target(g_end1_up_contact, push_dir_base, rr.CUBE_LEN)
@@ -249,7 +313,8 @@ def run_ik_mode(ur, home_q: np.ndarray) -> None:
         g_end2_contact = rr.cartesian_target(g_contact2, -push_dir_base, rr.PUSH_DISTANCE + 0.1)
         g_end2 = rr.tool0_from_tip(g_end2_contact)
         rr.publish_frame("push2_end", g_end2_contact)
-        q_end_final = safe_ik_move(q_curr, g_end2)
+        print("[PUSH] Starting second push (contact motion)...")
+        q_end_final = safe_ik_move(q_curr, g_end2, is_contact=True)
 
         g_target_actual = urFwdKin(q_end_final, rr.ROBOT_TYPE)
         rr.log_pose_details("Target", g_end2_contact, rr.tip_from_tool0(g_target_actual))
