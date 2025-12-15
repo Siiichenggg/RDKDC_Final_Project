@@ -11,7 +11,7 @@ cfg = struct();
 
 % --- Connection ---
 % mode: "sim" or "real"
-cfg.mode = "sim";
+cfg.mode = "real";
 % For "sim", you may pass an explicit IP. Leave empty to use interface default.
 cfg.sim_ip = "";
 
