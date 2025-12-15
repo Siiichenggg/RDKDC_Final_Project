@@ -1,4 +1,4 @@
-function finalerr_cm = ik_move_push_back(ur, type)
+function finalerr_cm = execute_push_sequence(ur, type)
 
     push_dist = 0.03;   % push distance (m)
     Tmove     = 3.0;    % move time per segment (s)
@@ -17,7 +17,7 @@ function finalerr_cm = ik_move_push_back(ur, type)
     ur.switch_to_ros_control();
     disp('Switched to ROS control.');
 
-    g_start = urFwdKin(q_start, type);
+    g_start = robotForwardKinematics(q_start, type);
     R0 = g_start(1:3,1:3);
     p0 = g_start(1:3,4);
     disp('Start location recorded.');
@@ -76,7 +76,7 @@ function finalerr_cm = ik_move_push_back(ur, type)
     ik_go(ur, type, g_back, Tmove);
 
     % -------------------- Final error (cm) wrt "back" target --------------------
-    g_act = urFwdKin(ur.get_current_joints(), type);
+    g_act = robotForwardKinematics(ur.get_current_joints(), type);
     finalerr_cm = norm(g_act(1:3,4) - g_back(1:3,4)) * 100;
     fprintf('Final position error (back target) = %.3f cm\n', finalerr_cm);
 
@@ -87,7 +87,7 @@ end
 function ik_go(ur, type, g_des, Tmove)
     q_cur = ur.get_current_joints();
     Q = urInvKin(g_des, type);                 % 6x8
-    [q_star, idx] = selectClosestIK(Q, q_cur);
+    [q_star, idx] = findOptimalJoints(Q, q_cur);
     if isempty(q_star)
         error('No valid IK solution for this waypoint.');
     end

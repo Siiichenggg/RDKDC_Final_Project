@@ -1,5 +1,5 @@
-function gst = urFwdKin(q, type)
-% urFwdKin - Forward Kinematics for UR5/UR5e
+function gst = robotForwardKinematics(q, type)
+% robotForwardKinematics - Forward Kinematics for UR5/UR5e
 % Input: q - 6x1 joint angles (radians)
 %        type - string 'ur5' or 'ur5e' (default 'ur5e')
 % Output: gst - 4x4 Homogeneous Transformation Matrix (Base -> Tool0)

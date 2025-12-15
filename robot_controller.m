@@ -1,10 +1,10 @@
-% Class ur_interface provides Matlab API to ur_modern_driver which controls the ur robots through ROS
+% Class robot_controller provides Matlab API to ur_modern_driver which controls the ur robots through ROS
 
 % Author: Mengze Xu, 07/24/2017
 % Updated by: Zhuoqun (Ray) Zhang, 08/04/2021
 % Updated by: Jakub Piwowarczyk, 08/27/2023
 
-classdef ur_interface < handle
+classdef robot_controller < handle
     % Class used to interface with ROS topics to communicate with UR
     % To create a robot interface
     
