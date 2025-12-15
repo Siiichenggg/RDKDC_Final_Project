@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import time
 from typing import List, Optional, Sequence, Tuple
+from collections import Counter
 
 import numpy as np
-from collections import Counter
 
 import rr_control as rr
 from control import urFwdKin
@@ -13,6 +13,12 @@ from IK_utils import urInvKin
 
 class IKNoSolutionError(RuntimeError):
     """Raised when IK fails or no safe solution can be selected."""
+
+
+def _clearance_pose_from_tool0(g_tool0: np.ndarray) -> np.ndarray:
+    """Return the pose to use for clearance checks (tip if enabled, else tool0)."""
+
+    return rr.tip_from_tool0(g_tool0) if rr.USE_PEN_TIP else g_tool0
 
 
 def _wrap_to_pi(theta: np.ndarray) -> np.ndarray:
@@ -84,21 +90,23 @@ def _select_best_solution(
         cost = l1_cost + 0.2 * max_step + wrist_penalty
         all_costs.append((col, cost, "pending"))
 
+        g_tool0 = urFwdKin(q_cand, robot_type)
+        g_clear = _clearance_pose_from_tool0(g_tool0)
+
         try:
-            g_cand = urFwdKin(q_cand, robot_type)
             rr.check_joint_limits(q_cand)
-            rr.check_table_clearance(g_cand)
+            rr.check_table_clearance(g_clear)
         except Exception as e:
             rejected_count += 1
             all_costs[-1] = (col, float("inf"), f"rejected({type(e).__name__})")
-            g_cand = g_cand if "g_cand" in locals() else None
             rejected_info.append(
                 {
                     "col": col,
                     "cost": cost,
                     "max_step": max_step,
                     "reason": type(e).__name__,
-                    "clearance": float(g_cand[2, 3]) if g_cand is not None else None,
+                    "clearance": float(g_clear[2, 3]) if g_clear is not None else None,
+                    "clearance_frame": "tip" if rr.USE_PEN_TIP else "tool0",
                     "q": q_cand,
                 }
             )
@@ -216,7 +224,7 @@ def ik_follow_waypoints_tool0(
         raise ValueError("q_start must be a 6-element vector.")
 
     rr.check_joint_limits(q_current)
-    rr.check_table_clearance(urFwdKin(q_current, robot_type))
+    rr.check_table_clearance(_clearance_pose_from_tool0(urFwdKin(q_current, robot_type)))
 
     # Execute waypoints one by one with closed-loop feedback
     for k, g_des_tool0 in enumerate(waypoints_tool0):
@@ -298,7 +306,7 @@ def ik_move_to_pose(
     q_start = np.asarray(q_meas if q_meas is not None else q_init, dtype=float).flatten()
 
     g_start = urFwdKin(q_start, robot_type)
-    rr.check_table_clearance(g_start)
+    rr.check_table_clearance(_clearance_pose_from_tool0(g_start))
     rr.check_joint_limits(q_start)
 
     waypoints = _interp_cartesian_segment_tool0(g_start, g_des_tool0, cart_step=cart_step)
