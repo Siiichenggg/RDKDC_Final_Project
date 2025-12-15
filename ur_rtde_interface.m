@@ -141,11 +141,19 @@ classdef ur_rtde_interface < handle
             end
             
             q_current = self.get_current_joints;
+            joint_v = zeros(6, num_waypoints);
+            joint_v(:,1) = (joint_goal(:,1) - q_current) ./ time_interval(1);
+            for i = 2:num_waypoints
+                joint_v(:,i) = (joint_goal(:,i) - joint_goal(:,i-1)) ./ time_interval(i);
+            end
+
+            if max(abs(joint_v), [], 'all') > self.speed_limit
+                error('Velocity over speed limit, please increase time_interval');
+            end
             
-            % Send trajectory - FIXED: use joint_goal directly without prepending q_current
-            % The timestamps should start from time_interval values, not from 0
-            positions = joint_goal;
-            timestamps = cumsum(time_interval);
+            % Send trajectory
+            positions = [q_current, joint_goal];
+            timestamps = [0, cumsum(time_interval)];
                         
             followJointWaypoints(self.ur, positions, 'WaypointTimes', timestamps);
         end
