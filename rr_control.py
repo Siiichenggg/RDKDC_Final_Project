@@ -311,9 +311,22 @@ def move_to_configuration(
 ) -> None:
     """Move the arm to ``q_target`` while respecting the configured joint-speed limit."""
 
-    q_target = np.asarray(q_target, dtype=float)
+    q_target = np.asarray(q_target, dtype=float).flatten()
     ur.activate_pos_control()
-    q_curr = ur.get_current_joints()
+    q_curr = np.asarray(ur.get_current_joints(), dtype=float).flatten()
+
+    # Guard against ±2π representation jumps (e.g., after switching control modes).
+    # Pick an equivalent joint vector (q + 2πk) that is closest to q_curr,
+    # while remaining inside the configured conservative joint limits.
+    wraps = 2.0 * np.pi * np.arange(-2, 3)
+    q_target_unwrapped = q_target.copy()
+    for idx in range(6):
+        low, high = JOINT_LIMITS[idx]
+        candidates = q_target[idx] + wraps
+        candidates = candidates[(candidates >= low) & (candidates <= high)]
+        if candidates.size:
+            q_target_unwrapped[idx] = candidates[np.argmin(np.abs(candidates - q_curr[idx]))]
+    q_target = q_target_unwrapped
     diff = np.abs(q_target - q_curr)
     move_time = min_segment_time
     margin = POS_SPEED_MARGIN if speed_margin is None else max(0.1, min(speed_margin, 1.0))

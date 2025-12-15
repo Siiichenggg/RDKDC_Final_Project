@@ -21,7 +21,7 @@ def _wrap_to_pi(theta: np.ndarray) -> np.ndarray:
     return (theta + np.pi) % (2.0 * np.pi) - np.pi
 
 
-def _select_best_solution(theta_6xm: np.ndarray, q_prev: np.ndarray, robot_type: str) -> Tuple[np.ndarray, int]:
+def _select_best_solution(theta_6xm: np.ndarray, q_prev: np.ndarray, robot_type: str, debug: bool = False) -> Tuple[np.ndarray, int]:
     """Pick the IK solution closest to q_prev that also passes safety checks."""
 
     theta_6xm = np.asarray(theta_6xm, dtype=float)
@@ -35,6 +35,8 @@ def _select_best_solution(theta_6xm: np.ndarray, q_prev: np.ndarray, robot_type:
     best_cost = float("inf")
     best_q: Optional[np.ndarray] = None
     best_idx = -1
+    rejected_count = 0
+    all_costs = []
 
     for col in range(theta_6xm.shape[1]):
         q_raw = theta_6xm[:, col].flatten()
@@ -44,17 +46,32 @@ def _select_best_solution(theta_6xm: np.ndarray, q_prev: np.ndarray, robot_type:
         dq = _wrap_to_pi(q_raw - q_prev)
         q_cand = q_prev + dq  # unwrap to remain closest to q_prev
 
+        cost = float(np.linalg.norm(dq))
+        all_costs.append((col, cost, "pending"))
+
         try:
             rr.check_joint_limits(q_cand)
             rr.check_table_clearance(urFwdKin(q_cand, robot_type))
-        except Exception:
+        except Exception as e:
+            rejected_count += 1
+            all_costs[-1] = (col, cost, f"rejected({type(e).__name__})")
             continue
 
-        cost = float(np.linalg.norm(dq))
+        all_costs[-1] = (col, cost, "valid")
         if cost < best_cost:
             best_cost = cost
             best_q = q_cand
             best_idx = col
+
+    if debug and rejected_count > 0:
+        print(f"[IK_SELECT] Total solutions: {theta_6xm.shape[1]}, Rejected: {rejected_count}, Valid: {theta_6xm.shape[1] - rejected_count}")
+        sorted_costs = sorted(all_costs, key=lambda x: x[1])
+        for idx, cost, status in sorted_costs[:3]:
+            print(f"  Solution {idx}: cost={cost:.4f} rad, status={status}")
+        if best_q is not None:
+            print(f"  Selected: solution {best_idx} with cost={best_cost:.4f} rad")
+            max_joint_move = np.max(np.abs(_wrap_to_pi(best_q - q_prev)))
+            print(f"  Max single-joint displacement: {np.rad2deg(max_joint_move):.2f}°")
 
     if best_q is None:
         raise IKNoSolutionError("All IK solutions failed safety checks (joint limits / table clearance).")
@@ -144,7 +161,10 @@ def ik_follow_waypoints_tool0(
 
             # Compute IK solution
             theta = urInvKin(g_des_tool0, robot_type)
-            q_next, idx = _select_best_solution(theta, q_current, robot_type)
+
+            # Enable detailed debug for first waypoint to diagnose "large rotation" issue
+            debug_ik_select = debug and retry_count == 0 and k == 0
+            q_next, idx = _select_best_solution(theta, q_current, robot_type, debug=debug_ik_select)
 
             if debug and retry_count == 0 and (k == 0 or k == len(waypoints_tool0) - 1):
                 print(f"[IK] waypoint {k+1}/{len(waypoints_tool0)} selected solution idx={idx}")
@@ -289,6 +309,7 @@ def run_ik_mode(ur, home_q: np.ndarray) -> None:
         g_end1 = rr.tool0_from_tip(g_end1_contact)
         rr.publish_frame("push1_end", g_end1_contact)
         print("[PUSH] Starting first push (contact motion)...")
+        print(f"[DEBUG] Current joint angles (deg): {np.rad2deg(q_start_actual)}")
         q_curr = safe_ik_move(q_start_actual, g_end1, is_contact=True)
 
         g_end1_up_contact = rr.translate_pose(g_end1_contact, lift_vec)
