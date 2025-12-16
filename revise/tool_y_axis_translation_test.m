@@ -1,6 +1,6 @@
-function position_error_cm = ik_move_toolY_3cm(robot_interface, robot_model)
+function position_error_cm = tool_y_axis_translation_test(robot_interface, robot_model)
     % ========================================
-    % ik_move_toolY_3cm - Move robot 3cm along tool Y-axis
+    % tool_y_axis_translation_test - Move robot 3cm along tool Y-axis
     %
     % Arguments:
     %   robot_interface - UR robot interface object
@@ -58,8 +58,31 @@ function position_error_cm = ik_move_toolY_3cm(robot_interface, robot_model)
 
     % ========== Step 7: Evaluate Positioning Accuracy ==========
     actual_pose = urFwdKin(robot_interface.get_current_joints(), robot_model);
-    position_error_meters = norm(actual_pose(1:3, 4) - target_pose(1:3, 4));
-    position_error_cm = position_error_meters * 100;
 
-    fprintf('>> Final positioning error: %.3f cm\n', position_error_cm);
+    % Compute position errors
+    position_diff = actual_pose(1:3, 4) - target_pose(1:3, 4);
+    position_error_x = position_diff(1) * 100;  % cm
+    position_error_y = position_diff(2) * 100;  % cm
+    position_error_z = position_diff(3) * 100;  % cm
+    position_error_total = norm(position_diff) * 100;  % cm
+
+    % Compute orientation error
+    rotation_error_matrix = actual_pose(1:3, 1:3)' * target_pose(1:3, 1:3);
+    angle_error_rad = acos((trace(rotation_error_matrix) - 1) / 2);
+    angle_error_deg = rad2deg(angle_error_rad);
+
+    % Display detailed error analysis
+    fprintf('\n========================================\n');
+    fprintf('DETAILED ERROR ANALYSIS\n');
+    fprintf('========================================\n');
+    fprintf('Position Errors:\n');
+    fprintf('  X-axis: %+.4f cm\n', position_error_x);
+    fprintf('  Y-axis: %+.4f cm\n', position_error_y);
+    fprintf('  Z-axis: %+.4f cm\n', position_error_z);
+    fprintf('  Total:  %.4f cm\n', position_error_total);
+    fprintf('\nOrientation Error:\n');
+    fprintf('  Angular: %.4f degrees (%.4f rad)\n', angle_error_deg, angle_error_rad);
+    fprintf('========================================\n');
+
+    position_error_cm = position_error_total;
 end
