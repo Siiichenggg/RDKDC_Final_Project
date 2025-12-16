@@ -354,11 +354,39 @@ def move_to_configuration(
     time.sleep(move_time)
 
 
+def compute_d_R3(r_actual: np.ndarray, r_desired: np.ndarray) -> float:
+    """Compute position error d_R3 in millimeters.
+
+    Args:
+        r_actual: Actual position (3D vector)
+        r_desired: Desired position (3D vector)
+
+    Returns:
+        Position error in millimeters: ||r - r_d|| × 1000
+    """
+    return np.linalg.norm(r_actual - r_desired) * 1000.0
+
+
+def compute_d_SO3(R_actual: np.ndarray, R_desired: np.ndarray) -> float:
+    """Compute orientation error d_SO3 (unitless).
+
+    Args:
+        R_actual: Actual rotation matrix (3x3)
+        R_desired: Desired rotation matrix (3x3)
+
+    Returns:
+        Orientation error: sqrt(tr((R - R_d)(R - R_d)^T))
+    """
+    R_diff = R_actual - R_desired
+    return np.sqrt(np.trace(R_diff @ R_diff.T))
+
+
 def print_detailed_errors(
     g_start_desired: np.ndarray,
     g_start_actual: np.ndarray,
     g_end_desired: np.ndarray,
-    g_end_actual: np.ndarray
+    g_end_actual: np.ndarray,
+    control_strategy: str = "RR"
 ) -> None:
     """Print detailed error analysis for the push-and-place task.
 
@@ -367,75 +395,54 @@ def print_detailed_errors(
         g_start_actual: Actual start pose (4x4 homogeneous transform)
         g_end_desired: Desired end pose (4x4 homogeneous transform)
         g_end_actual: Actual end pose (4x4 homogeneous transform)
+        control_strategy: Control strategy name (e.g., "RR ROS", "IK ROS", "RR RTDE")
     """
 
     print("\n" + "=" * 80)
-    print("DETAILED ERROR ANALYSIS")
+    print(f"ERROR ANALYSIS - {control_strategy}")
     print("=" * 80)
 
-    # Start position errors
-    p_start_des = g_start_desired[:3, 3]
-    p_start_act = g_start_actual[:3, 3]
-    pos_error_start = p_start_act - p_start_des
-
-    print("\n--- Start Position Errors ---")
-    print(f"Desired position (m): [{p_start_des[0]:.6f}, {p_start_des[1]:.6f}, {p_start_des[2]:.6f}]")
-    print(f"Actual position  (m): [{p_start_act[0]:.6f}, {p_start_act[1]:.6f}, {p_start_act[2]:.6f}]")
-    print(f"Error X (m): {pos_error_start[0]:+.6f}")
-    print(f"Error Y (m): {pos_error_start[1]:+.6f}")
-    print(f"Error Z (m): {pos_error_start[2]:+.6f}")
-    print(f"Position error norm (m): {np.linalg.norm(pos_error_start):.6f}")
-
-    # Start orientation errors
+    # Extract position and rotation for start
+    r_start_des = g_start_desired[:3, 3]
     R_start_des = g_start_desired[:3, :3]
+    r_start_act = g_start_actual[:3, 3]
     R_start_act = g_start_actual[:3, :3]
-    R_start_error = R_start_des.T @ R_start_act
-    orient_error_start = rotation_log(R_start_error)
 
-    print("\n--- Start Orientation Errors ---")
-    print(f"Orientation error (so3 vector): [{orient_error_start[0]:+.6f}, "
-          f"{orient_error_start[1]:+.6f}, {orient_error_start[2]:+.6f}]")
-    print(f"Orientation error magnitude (rad): {np.linalg.norm(orient_error_start):.6f}")
-    print(f"Orientation error magnitude (deg): {np.rad2deg(np.linalg.norm(orient_error_start)):.3f}")
-
-    # End position errors
-    p_end_des = g_end_desired[:3, 3]
-    p_end_act = g_end_actual[:3, 3]
-    pos_error_end = p_end_act - p_end_des
-
-    print("\n--- End Position Errors ---")
-    print(f"Desired position (m): [{p_end_des[0]:.6f}, {p_end_des[1]:.6f}, {p_end_des[2]:.6f}]")
-    print(f"Actual position  (m): [{p_end_act[0]:.6f}, {p_end_act[1]:.6f}, {p_end_act[2]:.6f}]")
-    print(f"Error X (m): {pos_error_end[0]:+.6f}")
-    print(f"Error Y (m): {pos_error_end[1]:+.6f}")
-    print(f"Error Z (m): {pos_error_end[2]:+.6f}")
-    print(f"Position error norm (m): {np.linalg.norm(pos_error_end):.6f}")
-
-    # End orientation errors
+    # Extract position and rotation for target
+    r_end_des = g_end_desired[:3, 3]
     R_end_des = g_end_desired[:3, :3]
+    r_end_act = g_end_actual[:3, 3]
     R_end_act = g_end_actual[:3, :3]
-    R_end_error = R_end_des.T @ R_end_act
-    orient_error_end = rotation_log(R_end_error)
 
-    print("\n--- End Orientation Errors ---")
-    print(f"Orientation error (so3 vector): [{orient_error_end[0]:+.6f}, "
-          f"{orient_error_end[1]:+.6f}, {orient_error_end[2]:+.6f}]")
-    print(f"Orientation error magnitude (rad): {np.linalg.norm(orient_error_end):.6f}")
-    print(f"Orientation error magnitude (deg): {np.rad2deg(np.linalg.norm(orient_error_end)):.3f}")
+    # Compute errors for Start
+    d_R3_start = compute_d_R3(r_start_act, r_start_des)
+    d_SO3_start = compute_d_SO3(R_start_act, R_start_des)
 
-    # Total displacement
-    total_displacement_des = np.linalg.norm(p_end_des - p_start_des)
-    total_displacement_act = np.linalg.norm(p_end_act - p_start_act)
+    # Compute errors for Target
+    d_R3_target = compute_d_R3(r_end_act, r_end_des)
+    d_SO3_target = compute_d_SO3(R_end_act, R_end_des)
 
-    print("\n--- Overall Motion Statistics ---")
-    print(f"Desired total displacement (m): {total_displacement_des:.6f}")
-    print(f"Actual total displacement (m):  {total_displacement_act:.6f}")
-    print(f"Displacement error (m): {abs(total_displacement_act - total_displacement_des):.6f}")
+    # Print results in table format
+    print("\n" + "-" * 80)
+    print(f"{'Location':<15} {'d_R3 (mm)':<20} {'d_SO3 (unitless)':<20}")
+    print("-" * 80)
+    print(f"{'Start':<15} {d_R3_start:<20.6f} {d_SO3_start:<20.6f}")
+    print(f"{'Target':<15} {d_R3_target:<20.6f} {d_SO3_target:<20.6f}")
+    print("-" * 80)
 
-    # Summary
-    print("\n--- Summary ---")
-    print(f"Maximum position error (m): {max(np.linalg.norm(pos_error_start), np.linalg.norm(pos_error_end)):.6f}")
-    print(f"Maximum orientation error (deg): {max(np.rad2deg(np.linalg.norm(orient_error_start)), np.rad2deg(np.linalg.norm(orient_error_end))):.3f}")
+    # Additional detailed information
+    print("\n--- Detailed Information ---")
+    print(f"\nStart:")
+    print(f"  Desired position (m): [{r_start_des[0]:.6f}, {r_start_des[1]:.6f}, {r_start_des[2]:.6f}]")
+    print(f"  Actual position  (m): [{r_start_act[0]:.6f}, {r_start_act[1]:.6f}, {r_start_act[2]:.6f}]")
+    print(f"  Position error (mm): {d_R3_start:.6f}")
+    print(f"  Orientation error:   {d_SO3_start:.6f}")
+
+    print(f"\nTarget:")
+    print(f"  Desired position (m): [{r_end_des[0]:.6f}, {r_end_des[1]:.6f}, {r_end_des[2]:.6f}]")
+    print(f"  Actual position  (m): [{r_end_act[0]:.6f}, {r_end_act[1]:.6f}, {r_end_act[2]:.6f}]")
+    print(f"  Position error (mm): {d_R3_target:.6f}")
+    print(f"  Orientation error:   {d_SO3_target:.6f}")
 
     print("=" * 80 + "\n")
 
@@ -521,11 +528,15 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
         print("Resolved-rate push-and-place completed.")
 
         # Print detailed error analysis
+        # For Start: compare taught start pose (from q_start FK) with actual start pose (from current joints FK)
+        # For Target: compare desired end pose with actual end pose
+        g_start_desired = tip_from_tool0(g_start)  # Desired start pose from taught joint angles
         print_detailed_errors(
-            g_start_contact,
-            g_start_contact,
-            g_end2_contact,
-            g_end_actual
+            g_start_desired,  # Desired start pose (from taught q_start)
+            g_start_contact,  # Actual start pose (from measured q_start_actual)
+            g_end2_contact,   # Desired target pose
+            g_end_actual,     # Actual target pose
+            control_strategy="RR"
         )
 
     except Exception as exc:
@@ -551,4 +562,6 @@ __all__ = [
     "tip_from_tool0",
     "tool0_from_tip",
     "print_detailed_errors",
+    "compute_d_R3",
+    "compute_d_SO3",
 ]
