@@ -19,13 +19,13 @@ cfg.sim_ip = "";
 cfg.robotType = "ur5e"; % "ur5" or "ur5e"
 
 % --- RR controller (position-step / discrete integration) ---
-cfg.dt = 0.10;              % [s] RR update period AND move_joints time interval
+cfg.dt = 1;              % [s] RR update period AND move_joints time interval
 cfg.K = 1.0;                % RR gain (dimensionless)
 cfg.posTol = 0.005;         % [m] translation tolerance
 cfg.rotTol = 5*pi/180;      % [rad] rotation tolerance
 cfg.maxSteps = 600;         % max RR iterations per segment
 cfg.dampLambda = 0.03;      % DLS damping (helps near singularities)
-cfg.rotWeight = 3.0;        % dimensionless weight on orientation error (keeps world orientation fixed)
+cfg.rotWeight = 5.0;        % dimensionless weight on orientation error (keeps world orientation fixed)
 
 % --- Safety / limits ---
 cfg.dqMax = 0.03;           % [rad/step] max joint increment magnitude (scaled)
@@ -46,7 +46,7 @@ cfg.cubeSide = 0.13;                 % [m] foam cube edge length (user/lab setup
 cfg.clearance = 0.03;                % [m] extra clearance for re-approach
 cfg.liftHeight = 0.05;               % [m] lift height for repositioning (safety)
 cfg.backApproachExtra = cfg.cubeSide + cfg.clearance; % [m] reach "other side" of cube
-cfg.timeToReturnToStart = 3.0;       % [s] time for returning to taught start
+cfg.timeToReturnToStart = 8.0;       % [s] time for returning to taught start
 
 %% =========================
 %  Path setup (avoid ur_rtde_interface shadowing)
