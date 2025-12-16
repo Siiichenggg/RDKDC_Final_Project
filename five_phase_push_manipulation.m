@@ -39,27 +39,30 @@ function position_error_cm = five_phase_push_manipulation(robot_interface, robot
     robot_interface.switch_to_ros_control();
     disp('>> Control switched to ROS mode.');
 
-    initial_pose = urFwdKin(initial_joints, robot_model);
-    reference_orientation = initial_pose(1:3, 1:3);
-    reference_position = initial_pose(1:3, 4);
+    % ========== START REFERENCE (期望) ==========
+    % This is the taught start pose - this becomes our reference
+    g_start_ref = urFwdKin(initial_joints, robot_model);
+    reference_orientation = g_start_ref(1:3, 1:3);
+    reference_position = g_start_ref(1:3, 4);
     disp('>> Initial pose recorded successfully.');
 
     % ========== START ERROR CALCULATION ==========
-    % Get actual start pose from robot's TF
-    T_start_actual = robot_interface.get_current_transformation('base', 'tool0');
-    r_start_actual = T_start_actual(1:3, 4);
-    R_start_actual = T_start_actual(1:3, 1:3);
+    % Get actual pose using FK from current joint angles
+    q_actual_start = robot_interface.get_current_joints();
+    g_act_start = urFwdKin(q_actual_start, robot_model);
+    r_start_actual = g_act_start(1:3, 4);
+    R_start_actual = g_act_start(1:3, 1:3);
 
-    % Desired start pose is the taught pose (reference)
-    r_start_desired = reference_position;
-    R_start_desired = reference_orientation;
+    % Desired start pose is the taught reference
+    r_start_desired = g_start_ref(1:3, 4);
+    R_start_desired = g_start_ref(1:3, 1:3);
 
     % Calculate and display Start errors
     [d_R3_start, d_SO3_start] = robot_interface.calculate_pose_error(...
         "Start", r_start_actual, R_start_actual, r_start_desired, R_start_desired);
 
     % ========== Compute Planar Push Direction ==========
-    planar_direction = compute_planar_tool_y(initial_pose);
+    planar_direction = compute_planar_tool_y(g_start_ref);
 
     % ========== Execute 5-Phase Manipulation Sequence ==========
 
@@ -102,22 +105,26 @@ function position_error_cm = five_phase_push_manipulation(robot_interface, robot
     disp('[Phase 5/5] Pushing back...');
     execute_motion_with_ik(robot_interface, robot_model, pose_final, MOTION_TIME_SEC);
 
-    % ========== Evaluate Final Positioning Error ==========
-    actual_pose = urFwdKin(robot_interface.get_current_joints(), robot_model);
-
     % ========== TARGET ERROR CALCULATION ==========
-    % Get actual target pose from robot's TF
-    T_target_actual = robot_interface.get_current_transformation('base', 'tool0');
-    r_target_actual = T_target_actual(1:3, 4);
-    R_target_actual = T_target_actual(1:3, 1:3);
+    % TARGET REFERENCE (期望): The final pose we want to reach
+    g_target_ref = pose_final;  % This is the planned final pose
 
-    % Desired target pose is the final planned pose
-    r_target_desired = pose_final(1:3, 4);
-    R_target_desired = pose_final(1:3, 1:3);
+    % Get actual pose using FK from current joint angles
+    q_actual_target = robot_interface.get_current_joints();
+    g_act_target = urFwdKin(q_actual_target, robot_model);
+    r_target_actual = g_act_target(1:3, 4);
+    R_target_actual = g_act_target(1:3, 1:3);
+
+    % Desired target pose
+    r_target_desired = g_target_ref(1:3, 4);
+    R_target_desired = g_target_ref(1:3, 1:3);
 
     % Calculate and display Target errors
     [d_R3_target, d_SO3_target] = robot_interface.calculate_pose_error(...
         "Target", r_target_actual, R_target_actual, r_target_desired, R_target_desired);
+
+    % ========== Legacy Error Calculation ==========
+    actual_pose = g_act_target;  % Use the FK result
 
     % ========== Legacy Error Calculation (for backward compatibility) ==========
     % Compute position errors

@@ -121,11 +121,47 @@ TARGET Location:
 
 ## 技术细节
 
+### 正确的误差计算逻辑
+
+所有位姿都通过**正运动学（FK）**计算得到：
+
+```matlab
+% 实际 FK
+g_act = urFwdKin(q_actual, robot_model);
+r = g_act(1:3, 4);      % 实际位置
+R = g_act(1:3, 1:3);    % 实际旋转
+
+% 期望
+r_d = g_ref(1:3, 4);    % 期望位置
+R_d = g_ref(1:3, 1:3);  % 期望旋转
+
+% 计算误差
+d_R3_mm = 1000 * norm(r - r_d);              % 位置误差（毫米）
+d_SO3   = sqrt(trace((R - R_d)*(R - R_d)'));  % 旋转误差
+```
+
+### 两个参考 pose 的定义
+
+#### 1️⃣ Start Reference（期望）
+```matlab
+g_start_ref = urFwdKin(initial_joints, robot_model);
+```
+- 就是 teach 得到的 start pose
+- 在 teach 模式下记录的关节角度通过 FK 计算得到
+
+#### 2️⃣ Target Reference（期望）
+```matlab
+g_target_ref = pose_final;
+```
+- 就是规划/控制算法最终想达到的 pose
+- 对于 push 操作，就是 push 后应该到达的 pose
+- 对于 return 操作，就是 return 后应该到达的 pose
+
 ### 数据源
-- **实际位姿**：从 ROS2 TF 树获取 (`get_current_transformation('base', 'tool0')`)
+- **实际位姿**：从当前关节角度通过 FK 计算 (`urFwdKin(q_actual, robot_model)`)
 - **期望位姿**：
-  - Start: 从 teach 模式记录的参考位姿
-  - Target: 从逆运动学计算的最终目标位姿
+  - Start: teach 时记录的关节角度通过 FK 计算
+  - Target: 规划算法定义的最终目标 pose
 
 ### 坐标系
 - 基座坐标系：`base`
