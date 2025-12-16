@@ -1,3 +1,9 @@
+"""Main entry point for the UR robot control application.
+
+This module provides a CLI menu for selecting different control strategies
+for the UR5/UR5e robot arm.
+"""
+
 from __future__ import annotations
 
 import sys

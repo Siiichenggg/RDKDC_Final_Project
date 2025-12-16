@@ -1,6 +1,14 @@
+"""Resolved-rate control module for UR5/UR5e robot arm.
+
+This module implements resolved-rate (RR) control for the UR robot arm,
+including push-and-place task execution with Cartesian space control.
+It provides functions for teaching poses, moving to configurations, and
+executing complex manipulation tasks using velocity or position control.
+"""
+
 from __future__ import annotations
 import time
-from typing import Iterable, List, Optional, Sequence
+from typing import List, Optional, Sequence
 
 import numpy as np
 from rclpy.duration import Duration
@@ -14,26 +22,37 @@ from ur_interface import UrInterface
 class JointLimitError(RuntimeError):
     """Raised when a joint exceeds the configured safety limits."""
 
-    pass
+
 # ---------------------------------------------------------------------------
 # Global configuration (adjust in one place when moving to hardware)
 # ---------------------------------------------------------------------------
 ROBOT_TYPE = "ur5e"
-USE_VEL_CONTROL = False  # Toggle RR mode between velocity control (True) and position steps (False)
-PUSH_DIR_FRAME = "world"  # {"base", "world"}
-PUSH_DIR_INPUT = np.array([1.0, 0.0, 0.0])  # direction expressed in PUSH_DIR_FRAME
-PUSH_DISTANCE = 0.03  # 3 cm contact push distance
-CUBE_LEN = 0.25  # cube edge length in meters
-LIFT_HEIGHT = 0.10  # clearance height for free-space motion
+# Toggle RR mode between velocity control (True) and position steps (False)
+USE_VEL_CONTROL = False
+# Push direction frame: "base" or "world"
+PUSH_DIR_FRAME = "world"
+# Direction expressed in PUSH_DIR_FRAME
+PUSH_DIR_INPUT = np.array([1.0, 0.0, 0.0])
+# 3 cm contact push distance
+PUSH_DISTANCE = 0.03
+# Cube edge length in meters
+CUBE_LEN = 0.25
+# Clearance height for free-space motion
+LIFT_HEIGHT = 0.10
+# Resolved-rate control parameters
 RR_DT = 0.08
 RR_KP = 0.6
 RR_ORIENT_KP = 0.4
 RR_POS_TOL = 5e-3
 MAX_RR_ITERS = 600
-RR_SPEED_MARGIN = 0.5  # scale commands to remain comfortably within the joint-speed limit
-POS_SPEED_MARGIN = 0.6  # position-control moves stay inside the joint-speed limit
-FREE_SPEED_LIMIT = 0.25  # faster joint-speed fraction for free-space RR moves (capped at hardware limit)
-TABLE_Z_MIN = 0.14  # keep tool above the table plane by at least 2 cm
+# Scale commands to remain comfortably within the joint-speed limit
+RR_SPEED_MARGIN = 0.5
+# Position-control moves stay inside the joint-speed limit
+POS_SPEED_MARGIN = 0.6
+# Faster joint-speed fraction for free-space RR moves (capped at hardware limit)
+FREE_SPEED_LIMIT = 0.25
+# Keep tool above the table plane by at least 2 cm
+TABLE_Z_MIN = 0.14
 JOINT_LIMITS = np.deg2rad(
     np.array(
         [
@@ -46,16 +65,19 @@ JOINT_LIMITS = np.deg2rad(
         ]
     )
 )
-SIMULATION_MODE = False  # Set to False on the real robot to enable Freedrive.
+# Set to False on the real robot to enable Freedrive
+SIMULATION_MODE = False
 SIM_START_Q = np.array([0.0, -1.3, 1.4, -1, -0.5, 1.0])
 ENABLE_TF_FRAMES = True
 DEFAULT_HOME_Q = np.array([0.0, -np.pi / 2, 0, -np.pi / 2, 0, 0.0])
-USE_PEN_TIP=True  # Whether to use pen_tip frame for teaching instead of tool0
-TOOL0_TO_PEN_TIP=np.array([[1, 0, 0, -0.049],
-                            [0, 1, 0, 0],
-                            [0, 0, 1, 0.12228],
-                            [0, 0, 0, 1]])  # Transform from tool0 to pen_tip frame
-tf_handles: dict[str, tf_frame] = {}
+# Whether to use pen_tip frame for teaching instead of tool0
+USE_PEN_TIP = True
+# Transform from tool0 to pen_tip frame
+TOOL0_TO_PEN_TIP = np.array([[1, 0, 0, -0.049],
+                              [0, 1, 0, 0],
+                              [0, 0, 1, 0.12228],
+                              [0, 0, 0, 1]])
+TF_HANDLES: dict[str, tf_frame] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -66,10 +88,10 @@ def publish_frame(name: str, g: np.ndarray) -> None:
 
     if not ENABLE_TF_FRAMES:
         return
-    if name not in tf_handles:
-        tf_handles[name] = tf_frame("base_link", name, g)
+    if name not in TF_HANDLES:
+        TF_HANDLES[name] = tf_frame("base_link", name, g)
     else:
-        tf_handles[name].move_frame("base_link", g)
+        TF_HANDLES[name].move_frame("base_link", g)
 
 
 def teach_pose(ur: UrInterface, label: str) -> np.ndarray:
@@ -91,24 +113,29 @@ def teach_pose(ur: UrInterface, label: str) -> np.ndarray:
 
 
 def check_joint_limits(q: np.ndarray) -> None:
-    """Raise if any joint exits the conservative limits."""
+    """Raise if any joint exceeds the conservative limits."""
 
     for idx in range(6):
         low, high = JOINT_LIMITS[idx]
         if not (low <= q[idx] <= high):
             raise JointLimitError(f"Joint {idx} exceeded limits: {q[idx]:.3f} rad")
 
+
 def tip_from_tool0(g_tool0: np.ndarray) -> np.ndarray:
     """Compute the pen_tip frame from the tool0 frame."""
+
     if not USE_PEN_TIP:
         return g_tool0
     return g_tool0 @ TOOL0_TO_PEN_TIP
 
+
 def tool0_from_tip(g_tip: np.ndarray) -> np.ndarray:
     """Compute the tool0 frame from the pen_tip frame."""
+
     if not USE_PEN_TIP:
         return g_tip
     return g_tip @ np.linalg.inv(TOOL0_TO_PEN_TIP)
+
 
 def check_table_clearance(g: np.ndarray) -> None:
     """Keep the tool above the table plane."""
@@ -238,7 +265,7 @@ def rr_move_to_pose(
     g_des: np.ndarray,
     robot_type: str = ROBOT_TYPE,
 ) -> np.ndarray:
-    """Resolved-rate servoing loop that drives the tool position to ``g_des``."""
+    """Resolved-rate servoing loop that drives the tool position to g_des."""
 
     print("Starting resolved-rate segment...")
     q = q_init.astype(float).copy()
@@ -304,12 +331,13 @@ def interp_cartesian_segment(g_start: np.ndarray, g_end: np.ndarray, n_steps: in
     return poses
 
 
-
-
 def move_to_configuration(
-    ur: UrInterface, q_target: np.ndarray, min_segment_time: float = 3.0, speed_margin: Optional[float] = None
+    ur: UrInterface,
+    q_target: np.ndarray,
+    min_segment_time: float = 3.0,
+    speed_margin: Optional[float] = None
 ) -> None:
-    """Move the arm to ``q_target`` while respecting the configured joint-speed limit."""
+    """Move the arm to q_target while respecting the configured joint-speed limit."""
 
     q_target = np.asarray(q_target, dtype=float)
     ur.activate_pos_control()
@@ -324,6 +352,92 @@ def move_to_configuration(
             move_time = min_time
     ur.move_joints(q_target, time_intervals=[move_time])
     time.sleep(move_time)
+
+
+def print_detailed_errors(
+    g_start_desired: np.ndarray,
+    g_start_actual: np.ndarray,
+    g_end_desired: np.ndarray,
+    g_end_actual: np.ndarray
+) -> None:
+    """Print detailed error analysis for the push-and-place task.
+
+    Args:
+        g_start_desired: Desired start pose (4x4 homogeneous transform)
+        g_start_actual: Actual start pose (4x4 homogeneous transform)
+        g_end_desired: Desired end pose (4x4 homogeneous transform)
+        g_end_actual: Actual end pose (4x4 homogeneous transform)
+    """
+
+    print("\n" + "=" * 80)
+    print("DETAILED ERROR ANALYSIS")
+    print("=" * 80)
+
+    # Start position errors
+    p_start_des = g_start_desired[:3, 3]
+    p_start_act = g_start_actual[:3, 3]
+    pos_error_start = p_start_act - p_start_des
+
+    print("\n--- Start Position Errors ---")
+    print(f"Desired position (m): [{p_start_des[0]:.6f}, {p_start_des[1]:.6f}, {p_start_des[2]:.6f}]")
+    print(f"Actual position  (m): [{p_start_act[0]:.6f}, {p_start_act[1]:.6f}, {p_start_act[2]:.6f}]")
+    print(f"Error X (m): {pos_error_start[0]:+.6f}")
+    print(f"Error Y (m): {pos_error_start[1]:+.6f}")
+    print(f"Error Z (m): {pos_error_start[2]:+.6f}")
+    print(f"Position error norm (m): {np.linalg.norm(pos_error_start):.6f}")
+
+    # Start orientation errors
+    R_start_des = g_start_desired[:3, :3]
+    R_start_act = g_start_actual[:3, :3]
+    R_start_error = R_start_des.T @ R_start_act
+    orient_error_start = rotation_log(R_start_error)
+
+    print("\n--- Start Orientation Errors ---")
+    print(f"Orientation error (so3 vector): [{orient_error_start[0]:+.6f}, "
+          f"{orient_error_start[1]:+.6f}, {orient_error_start[2]:+.6f}]")
+    print(f"Orientation error magnitude (rad): {np.linalg.norm(orient_error_start):.6f}")
+    print(f"Orientation error magnitude (deg): {np.rad2deg(np.linalg.norm(orient_error_start)):.3f}")
+
+    # End position errors
+    p_end_des = g_end_desired[:3, 3]
+    p_end_act = g_end_actual[:3, 3]
+    pos_error_end = p_end_act - p_end_des
+
+    print("\n--- End Position Errors ---")
+    print(f"Desired position (m): [{p_end_des[0]:.6f}, {p_end_des[1]:.6f}, {p_end_des[2]:.6f}]")
+    print(f"Actual position  (m): [{p_end_act[0]:.6f}, {p_end_act[1]:.6f}, {p_end_act[2]:.6f}]")
+    print(f"Error X (m): {pos_error_end[0]:+.6f}")
+    print(f"Error Y (m): {pos_error_end[1]:+.6f}")
+    print(f"Error Z (m): {pos_error_end[2]:+.6f}")
+    print(f"Position error norm (m): {np.linalg.norm(pos_error_end):.6f}")
+
+    # End orientation errors
+    R_end_des = g_end_desired[:3, :3]
+    R_end_act = g_end_actual[:3, :3]
+    R_end_error = R_end_des.T @ R_end_act
+    orient_error_end = rotation_log(R_end_error)
+
+    print("\n--- End Orientation Errors ---")
+    print(f"Orientation error (so3 vector): [{orient_error_end[0]:+.6f}, "
+          f"{orient_error_end[1]:+.6f}, {orient_error_end[2]:+.6f}]")
+    print(f"Orientation error magnitude (rad): {np.linalg.norm(orient_error_end):.6f}")
+    print(f"Orientation error magnitude (deg): {np.rad2deg(np.linalg.norm(orient_error_end)):.3f}")
+
+    # Total displacement
+    total_displacement_des = np.linalg.norm(p_end_des - p_start_des)
+    total_displacement_act = np.linalg.norm(p_end_act - p_start_act)
+
+    print("\n--- Overall Motion Statistics ---")
+    print(f"Desired total displacement (m): {total_displacement_des:.6f}")
+    print(f"Actual total displacement (m):  {total_displacement_act:.6f}")
+    print(f"Displacement error (m): {abs(total_displacement_act - total_displacement_des):.6f}")
+
+    # Summary
+    print("\n--- Summary ---")
+    print(f"Maximum position error (m): {max(np.linalg.norm(pos_error_start), np.linalg.norm(pos_error_end)):.6f}")
+    print(f"Maximum orientation error (deg): {max(np.rad2deg(np.linalg.norm(orient_error_start)), np.rad2deg(np.linalg.norm(orient_error_end))):.3f}")
+
+    print("=" * 80 + "\n")
 
 
 def return_home(ur: UrInterface, home_q: np.ndarray) -> None:
@@ -364,7 +478,7 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
         g_start = urFwdKin(q_start, ROBOT_TYPE)
         q_start_actual = ur.get_current_joints()
         g_start_actual = urFwdKin(q_start_actual, ROBOT_TYPE)
-        
+
         g_start_contact = tip_from_tool0(g_start_actual)
         publish_frame("start_pose", g_start_contact)
         log_pose_details("Start", tip_from_tool0(g_start), g_start_contact)
@@ -373,7 +487,7 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
         print(f"[PUSH] frame={PUSH_DIR_FRAME} input={PUSH_DIR_INPUT}")
         print(f"[PUSH] push_dir_base(planar)={push_dir_base}")
         g_end1_contact = cartesian_target(g_start_contact, push_dir_base, PUSH_DISTANCE)
-        g_end1= tool0_from_tip(g_end1_contact)
+        g_end1 = tool0_from_tip(g_end1_contact)
         publish_frame("push1_end", g_end1_contact)
         q_curr = safe_rr_move(q_start_actual, g_end1)
 
@@ -396,14 +510,23 @@ def run_rr_mode(ur: UrInterface, home_q: np.ndarray) -> None:
             finally:
                 ur.speed_limit = prev_limit
 
-        g_end2_contact = cartesian_target(g_contact2, -push_dir_base, PUSH_DISTANCE+0.1)
-        g_end2= tool0_from_tip(g_end2_contact)
+        g_end2_contact = cartesian_target(g_contact2, -push_dir_base, PUSH_DISTANCE + 0.1)
+        g_end2 = tool0_from_tip(g_end2_contact)
         publish_frame("push2_end", g_end2_contact)
         q_end_final = safe_rr_move(q_curr, g_end2)
         g_target_actual = urFwdKin(q_end_final, ROBOT_TYPE)
-        log_pose_details("Target", g_end2_contact, tip_from_tool0(g_target_actual))
+        g_end_actual = tip_from_tool0(g_target_actual)
+
+        log_pose_details("Target", g_end2_contact, g_end_actual)
         print("Resolved-rate push-and-place completed.")
-        print(tip_from_tool0(g_start_actual)[:3,3] - g_start_actual[:3,3])
+
+        # Print detailed error analysis
+        print_detailed_errors(
+            g_start_contact,
+            g_start_contact,
+            g_end2_contact,
+            g_end_actual
+        )
 
     except Exception as exc:
         print(f"RR mode aborted due to error: {exc}")
@@ -425,6 +548,7 @@ __all__ = [
     "DEFAULT_HOME_Q",
     "teach_pose",
     "move_to_configuration",
-    'tip_from_tool0',
-    'tool0_from_tip',
+    "tip_from_tool0",
+    "tool0_from_tip",
+    "print_detailed_errors",
 ]
