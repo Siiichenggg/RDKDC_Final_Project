@@ -83,3 +83,19 @@ taskResult = rtde_push_and_place_task(ur, q_start, g_start, cfg);
 
 fprintf("\nTask finished. Summary:\n");
 disp(taskResult);
+
+%% =========================
+%  Display Error Metrics
+%  =========================
+if isfield(taskResult, 'errors') && ~isempty(taskResult.errors)
+    fprintf("\n========================================\n");
+    fprintf("         POSE ERROR METRICS\n");
+    fprintf("========================================\n");
+    for i = 1:length(taskResult.errors)
+        err = taskResult.errors(i);
+        fprintf("\nLocation: %s\n", err.location);
+        fprintf("  d_R3 (mm):    %.4f\n", err.d_R3_mm);
+        fprintf("  d_SO3:        %.6f\n", err.d_SO3);
+    end
+    fprintf("========================================\n");
+end

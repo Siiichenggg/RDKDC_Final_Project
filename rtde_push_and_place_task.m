@@ -5,6 +5,7 @@ out = struct();
 out.ok = false;
 out.segments = struct([]);
 out.msg = "";
+out.errors = struct([]);
 
 % Normalize direction
 pushDir = cfg.pushDirBase(:);
@@ -19,6 +20,20 @@ R_ref = g_start(1:3, 1:3);
 % Return to taught start pose deterministically
 ur.move_joints(q_start, cfg.timeToReturnToStart);
 pause(cfg.timeToReturnToStart);
+
+% ========== START ERROR MEASUREMENT ==========
+fprintf("\n=== Measuring Start Pose Error ===\n");
+q_start_actual = ur.get_current_joints();
+g_start_actual = rtde_urFwdKin(q_start_actual, cfg.robotType);
+[d_R3_start, d_SO3_start] = rtde_compute_pose_error(g_start_actual, g_start);
+fprintf("Start Error - d_R3: %.4f mm, d_SO3: %.6f\n", d_R3_start, d_SO3_start);
+
+% Record start error
+error_start = struct();
+error_start.location = "Start";
+error_start.d_R3_mm = d_R3_start;
+error_start.d_SO3 = d_SO3_start;
+out.errors = error_start;
 
 % Segment A: Push cube ~3cm (start -> end)
 p_push_end = g_start(1:3,4) + cfg.pushDist * pushDir;
@@ -98,6 +113,20 @@ if ~segF.converged
     out.msg = "Failed in push_back: " + segF.msg;
     return;
 end
+
+% ========== TARGET ERROR MEASUREMENT ==========
+fprintf("\n=== Measuring Target Pose Error ===\n");
+q_target_actual = segF.q_final;
+g_target_actual = rtde_urFwdKin(q_target_actual, cfg.robotType);
+[d_R3_target, d_SO3_target] = rtde_compute_pose_error(g_target_actual, g_push_back_end);
+fprintf("Target Error - d_R3: %.4f mm, d_SO3: %.6f\n", d_R3_target, d_SO3_target);
+
+% Record target error
+error_target = struct();
+error_target.location = "Target";
+error_target.d_R3_mm = d_R3_target;
+error_target.d_SO3 = d_SO3_target;
+out.errors(end+1,1) = error_target;
 
 out.ok = true;
 out.msg = "OK";
