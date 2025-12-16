@@ -437,6 +437,45 @@ classdef ur_interface < handle
             end
         end
 
+        % ========================================
+        % Calculate and display pose error metrics
+        %
+        % Arguments:
+        %   location     - String: "Start" or "Target"
+        %   r_actual     - 3x1 vector: actual position (meters)
+        %   R_actual     - 3x3 matrix: actual rotation matrix
+        %   r_desired    - 3x1 vector: desired position (meters)
+        %   R_desired    - 3x3 matrix: desired rotation matrix
+        %
+        % Outputs:
+        %   d_R3         - Position error in mm
+        %   d_SO3        - Rotation error (unitless)
+        % ========================================
+        function [d_R3, d_SO3] = calculate_pose_error(~, location, r_actual, R_actual, r_desired, R_desired)
+            % Validate inputs
+            validateattributes(r_actual, {'numeric'}, {'size', [3, 1]});
+            validateattributes(R_actual, {'numeric'}, {'size', [3, 3]});
+            validateattributes(r_desired, {'numeric'}, {'size', [3, 1]});
+            validateattributes(R_desired, {'numeric'}, {'size', [3, 3]});
+
+            % Calculate position error in R^3 (convert meters to millimeters)
+            d_R3 = norm(r_actual - r_desired) * 1000;
+
+            % Calculate rotation error in SO(3)
+            % d_SO3 = sqrt(trace((R - R_d)(R - R_d)^T))
+            R_diff = R_actual - R_desired;
+            d_SO3 = sqrt(trace(R_diff * R_diff'));
+
+            % Display results
+            fprintf('\n========================================\n');
+            fprintf('Pose Error Analysis - %s\n', location);
+            fprintf('========================================\n');
+            fprintf('Location:        %s\n', location);
+            fprintf('d_R3 (mm):       %.4f\n', d_R3);
+            fprintf('d_SO3:           %.4f\n', d_SO3);
+            fprintf('========================================\n\n');
+        end
+
     end  % methods
 
 end  % classdef

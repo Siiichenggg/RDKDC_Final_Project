@@ -44,6 +44,20 @@ function position_error_cm = five_phase_push_manipulation(robot_interface, robot
     reference_position = initial_pose(1:3, 4);
     disp('>> Initial pose recorded successfully.');
 
+    % ========== START ERROR CALCULATION ==========
+    % Get actual start pose from robot's TF
+    T_start_actual = robot_interface.get_current_transformation('base', 'tool0');
+    r_start_actual = T_start_actual(1:3, 4);
+    R_start_actual = T_start_actual(1:3, 1:3);
+
+    % Desired start pose is the taught pose (reference)
+    r_start_desired = reference_position;
+    R_start_desired = reference_orientation;
+
+    % Calculate and display Start errors
+    [d_R3_start, d_SO3_start] = robot_interface.calculate_pose_error(...
+        "Start", r_start_actual, R_start_actual, r_start_desired, R_start_desired);
+
     % ========== Compute Planar Push Direction ==========
     planar_direction = compute_planar_tool_y(initial_pose);
 
@@ -91,6 +105,21 @@ function position_error_cm = five_phase_push_manipulation(robot_interface, robot
     % ========== Evaluate Final Positioning Error ==========
     actual_pose = urFwdKin(robot_interface.get_current_joints(), robot_model);
 
+    % ========== TARGET ERROR CALCULATION ==========
+    % Get actual target pose from robot's TF
+    T_target_actual = robot_interface.get_current_transformation('base', 'tool0');
+    r_target_actual = T_target_actual(1:3, 4);
+    R_target_actual = T_target_actual(1:3, 1:3);
+
+    % Desired target pose is the final planned pose
+    r_target_desired = pose_final(1:3, 4);
+    R_target_desired = pose_final(1:3, 1:3);
+
+    % Calculate and display Target errors
+    [d_R3_target, d_SO3_target] = robot_interface.calculate_pose_error(...
+        "Target", r_target_actual, R_target_actual, r_target_desired, R_target_desired);
+
+    % ========== Legacy Error Calculation (for backward compatibility) ==========
     % Compute position errors
     position_diff = actual_pose(1:3, 4) - pose_final(1:3, 4);
     position_error_x = position_diff(1) * 100;  % cm
@@ -105,7 +134,7 @@ function position_error_cm = five_phase_push_manipulation(robot_interface, robot
 
     % Display detailed error analysis
     fprintf('\n========================================\n');
-    fprintf('DETAILED ERROR ANALYSIS\n');
+    fprintf('DETAILED ERROR ANALYSIS (Legacy Format)\n');
     fprintf('========================================\n');
     fprintf('Position Errors:\n');
     fprintf('  X-axis: %+.4f cm\n', position_error_x);
@@ -114,6 +143,18 @@ function position_error_cm = five_phase_push_manipulation(robot_interface, robot
     fprintf('  Total:  %.4f cm\n', position_error_total);
     fprintf('\nOrientation Error:\n');
     fprintf('  Angular: %.4f degrees (%.4f rad)\n', angle_error_deg, angle_error_rad);
+    fprintf('========================================\n');
+
+    % ========== SUMMARY OF ALL ERRORS ==========
+    fprintf('\n========================================\n');
+    fprintf('COMPLETE ERROR SUMMARY\n');
+    fprintf('========================================\n');
+    fprintf('START Location:\n');
+    fprintf('  d_R3 (mm):  %.4f\n', d_R3_start);
+    fprintf('  d_SO3:      %.4f\n', d_SO3_start);
+    fprintf('\nTARGET Location:\n');
+    fprintf('  d_R3 (mm):  %.4f\n', d_R3_target);
+    fprintf('  d_SO3:      %.4f\n', d_SO3_target);
     fprintf('========================================\n');
 
     position_error_cm = position_error_total;
