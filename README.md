@@ -127,6 +127,3 @@ Phase 5: Push back (3cm)
 - Sicheng Lu
 - Jiafeng Gu
 - Yuxin Xie
-- Zhuoqun (Ray) Zhang (2021)
-- Jakub Piwowarczyk (2023)
-- Jiacheng Li (2025)
